@@ -33,7 +33,7 @@ var (
 )
 
 func init() {
-	showCmd.Flags().BoolVar(&showThinking, "thinking", false, "Include thinking blocks")
+	showCmd.Flags().BoolVar(&showThinking, "thinking", true, "Include thinking blocks (default: true)")
 	showCmd.Flags().BoolVar(&showTools, "tools", false, "Include tool calls")
 	showCmd.Flags().BoolVar(&showJSON, "json", false, "Output as JSON")
 	showCmd.Flags().BoolVar(&showRaw, "raw", false, "Output raw JSONL")
@@ -54,6 +54,14 @@ func runShow(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("loading conversation: %w", err)
 	}
 
+	// Count agents for main conversations
+	agentCount := 0
+	if !conv.Meta.IsAgent {
+		projectDir := filepath.Dir(path)
+		scanner := history.NewScanner(history.ScannerOptions{ProjectsDir: cfg.ProjectsDir})
+		agentCount = scanner.CountAgents(projectDir, conv.Meta.SessionID)
+	}
+
 	// Display
 	disp := display.NewConversationDisplay(display.ConversationDisplayOptions{
 		Writer:       os.Stdout,
@@ -61,6 +69,7 @@ func runShow(cmd *cobra.Command, args []string) error {
 		ShowTools:    showTools,
 		JSON:         showJSON,
 		Raw:          showRaw,
+		AgentCount:   agentCount,
 	})
 
 	return disp.Render(conv)

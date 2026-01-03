@@ -73,11 +73,27 @@ func runList(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Count projects for global view
+	projectCount := 0
+	if listGlobal || listProject == "" {
+		projects, _ := history.ListProjects(cfg.ProjectsDir)
+		projectCount = len(projects)
+	}
+
+	// Get display project path
+	displayProject := opts.ProjectPath
+	if displayProject == "" && !listGlobal {
+		displayProject, _ = os.Getwd()
+	}
+
 	// Render table
 	table := display.NewConversationTable(display.TableOptions{
-		Writer:    os.Stdout,
-		ShowAgent: listAgents,
-		JSON:      listJSON,
+		Writer:       os.Stdout,
+		ShowAgent:    listAgents,
+		JSON:         listJSON,
+		ProjectPath:  displayProject,
+		IsGlobal:     listGlobal,
+		ProjectCount: projectCount,
 	})
 
 	return table.Render(conversations)

@@ -15,10 +15,11 @@ import (
 // ConversationDisplayOptions configures conversation display.
 type ConversationDisplayOptions struct {
 	Writer       io.Writer
-	ShowThinking bool   // Include thinking blocks
-	ShowTools    bool   // Include tool calls
-	JSON         bool   // Output as JSON
-	Raw          bool   // Output raw JSONL
+	ShowThinking bool // Include thinking blocks
+	ShowTools    bool // Include tool calls
+	JSON         bool // Output as JSON
+	Raw          bool // Output raw JSONL
+	AgentCount   int  // Number of agents spawned by this conversation
 }
 
 // DefaultConversationDisplayOptions returns default display options.
@@ -145,7 +146,31 @@ func (d *ConversationDisplay) renderFormatted(conv *history.Conversation) error 
 		d.renderEntry(entry)
 	}
 
+	// Footer with navigation hints
+	d.renderFooter(conv)
+
 	return nil
+}
+
+func (d *ConversationDisplay) renderFooter(conv *history.Conversation) {
+	// Don't show footer for agents
+	if conv.Meta.IsAgent {
+		return
+	}
+
+	fmt.Fprintln(d.opts.Writer)
+	fmt.Fprintln(d.opts.Writer, strings.Repeat("─", 60))
+
+	shortID := history.ShortID(conv.Meta.ID)
+
+	if d.opts.AgentCount > 0 {
+		fmt.Fprintf(d.opts.Writer, "%s Run: %s\n",
+			Dim(fmt.Sprintf("%d agent(s) spawned.", d.opts.AgentCount)),
+			ID(fmt.Sprintf("ch agents %s", shortID)),
+		)
+	}
+
+	fmt.Fprintf(d.opts.Writer, "%s %s\n", Dim("Resume:"), ID(fmt.Sprintf("ch resume %s", shortID)))
 }
 
 func (d *ConversationDisplay) renderHeader(conv *history.Conversation) {
@@ -177,6 +202,33 @@ func (d *ConversationDisplay) renderHeader(conv *history.Conversation) {
 func (d *ConversationDisplay) renderEntry(entry *jsonl.RawEntry) {
 	msg, err := jsonl.ParseMessage(entry)
 	if err != nil || msg == nil {
+		return
+	}
+
+	// Check if there's any visible content
+	hasContent := false
+	for _, block := range msg.Content {
+		switch block.Type {
+		case jsonl.BlockTypeText:
+			if block.Text != "" {
+				hasContent = true
+			}
+		case jsonl.BlockTypeThinking:
+			if d.opts.ShowThinking && block.Thinking != "" {
+				hasContent = true
+			}
+		case jsonl.BlockTypeToolUse, jsonl.BlockTypeToolResult:
+			if d.opts.ShowTools {
+				hasContent = true
+			}
+		}
+		if hasContent {
+			break
+		}
+	}
+
+	// Skip entries with no visible content
+	if !hasContent {
 		return
 	}
 

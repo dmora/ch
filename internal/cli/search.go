@@ -67,6 +67,17 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		opts.ProjectPath = cwd
 	}
 
+	// Show search context
+	if !searchJSON {
+		scope := "current project"
+		if searchGlobal {
+			scope = "all projects"
+		} else if searchProject != "" {
+			scope = searchProject
+		}
+		fmt.Fprintf(os.Stdout, "%s \"%s\" %s\n\n", display.Dim("Searching for"), display.Match(query), display.Dim("in "+scope+"..."))
+	}
+
 	results, err := history.Search(query, opts)
 	if err != nil {
 		return fmt.Errorf("searching: %w", err)
@@ -76,6 +87,7 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	table := display.NewSearchResultTable(display.TableOptions{
 		Writer: os.Stdout,
 		JSON:   searchJSON,
+		Query:  query,
 	})
 
 	return table.Render(results)

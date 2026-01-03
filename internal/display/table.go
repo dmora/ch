@@ -17,6 +17,14 @@ type TableOptions struct {
 	Writer    io.Writer
 	ShowAgent bool // Show agent indicator
 	JSON      bool // Output as JSON
+
+	// Context for headers/footers
+	ProjectPath    string // Current project path (empty if global)
+	IsGlobal       bool   // Showing all projects
+	ProjectCount   int    // Number of projects (for global view)
+	TotalAgents    int    // Total agents across all shown conversations
+	CurrentProject string // Current working directory's project (for marking)
+	Query          string // Search query (for search results)
 }
 
 // DefaultTableOptions returns default table options.
@@ -90,6 +98,9 @@ func (t *ConversationTable) renderTable(conversations []*history.ConversationMet
 		return nil
 	}
 
+	// Context header
+	t.renderContextHeader(len(conversations))
+
 	table := tablewriter.NewWriter(t.opts.Writer)
 	table.SetHeader([]string{"ID", "Time", "Messages", "Preview"})
 	table.SetBorder(false)
@@ -115,7 +126,40 @@ func (t *ConversationTable) renderTable(conversations []*history.ConversationMet
 	}
 
 	table.Render()
+
+	// Footer hint
+	t.renderFooterHint(conversations)
+
 	return nil
+}
+
+// renderContextHeader prints context about what's being displayed.
+func (t *ConversationTable) renderContextHeader(count int) {
+	if t.opts.IsGlobal {
+		if t.opts.ProjectCount > 0 {
+			fmt.Fprintf(t.opts.Writer, "%s\n\n", Dim(fmt.Sprintf("Showing %d conversations across %d projects", count, t.opts.ProjectCount)))
+		} else {
+			fmt.Fprintf(t.opts.Writer, "%s\n\n", Dim(fmt.Sprintf("Showing %d conversations (all projects)", count)))
+		}
+	} else if t.opts.ProjectPath != "" {
+		fmt.Fprintf(t.opts.Writer, "%s %s\n\n", Dim("Project:"), Project(t.opts.ProjectPath))
+	}
+}
+
+// renderFooterHint prints helpful hints about the output.
+func (t *ConversationTable) renderFooterHint(conversations []*history.ConversationMeta) {
+	// Check if any conversations have agents
+	hasAgents := false
+	for _, c := range conversations {
+		if c.AgentCount > 0 {
+			hasAgents = true
+			break
+		}
+	}
+
+	if hasAgents {
+		fmt.Fprintf(t.opts.Writer, "\n%s\n", Dim("[+N] = spawned agents. Use 'ch agents <id>' to list, 'ch resume <id>' to continue."))
+	}
 }
 
 // formatRelativeTime formats a time as a relative string (e.g., "2h ago").
@@ -220,8 +264,21 @@ func (t *ProjectTable) renderTable(projects []*history.Project) error {
 	table.SetNoWhiteSpace(true)
 	table.SetAutoWrapText(false)
 
+	// Calculate totals
+	var totalConvs, totalAgents int
+	var totalSize int64
+	for _, p := range projects {
+		totalConvs += p.ConversationCount
+		totalAgents += p.AgentCount
+		totalSize += p.TotalSize
+	}
+
 	for _, p := range projects {
 		path := truncateString(p.Path, 50)
+		// Mark current project
+		if t.opts.CurrentProject != "" && p.Path == t.opts.CurrentProject {
+			path = path + " " + Match("*")
+		}
 		convs := fmt.Sprintf("%d", p.ConversationCount)
 		agents := fmt.Sprintf("%d", p.AgentCount)
 		size := FormatBytes(p.TotalSize)
@@ -230,6 +287,20 @@ func (t *ProjectTable) renderTable(projects []*history.Project) error {
 	}
 
 	table.Render()
+
+	// Totals footer
+	fmt.Fprintf(t.opts.Writer, "\n%s  %s  %s  %s\n",
+		Dim("TOTAL"),
+		Number(fmt.Sprintf("%d", totalConvs)),
+		Number(fmt.Sprintf("%d", totalAgents)),
+		FormatBytes(totalSize),
+	)
+
+	// Legend for current project marker
+	if t.opts.CurrentProject != "" {
+		fmt.Fprintf(t.opts.Writer, "\n%s\n", Dim("* = current project"))
+	}
+
 	return nil
 }
 
@@ -284,6 +355,15 @@ func (t *SearchResultTable) renderTable(results []*history.SearchResult) error {
 		fmt.Fprintln(t.opts.Writer, Dim("No matches found"))
 		return nil
 	}
+
+	// Count total matches
+	totalMatches := 0
+	for _, r := range results {
+		totalMatches += r.MatchCount
+	}
+
+	// Summary header
+	fmt.Fprintf(t.opts.Writer, "%s\n\n", Dim(fmt.Sprintf("Found %d matches in %d conversations", totalMatches, len(results))))
 
 	for i, r := range results {
 		if i > 0 {

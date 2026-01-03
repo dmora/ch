@@ -28,9 +28,16 @@ func runProjects(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Get current project path
+	currentProject := ""
+	if cwd, err := os.Getwd(); err == nil {
+		currentProject = cwd
+	}
+
 	table := display.NewProjectTable(display.TableOptions{
-		Writer: os.Stdout,
-		JSON:   projectsJSON,
+		Writer:         os.Stdout,
+		JSON:           projectsJSON,
+		CurrentProject: currentProject,
 	})
 
 	return table.Render(projects)
