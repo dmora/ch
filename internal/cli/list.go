@@ -30,7 +30,7 @@ var (
 )
 
 func init() {
-	listCmd.Flags().BoolVarP(&listAgents, "agents", "a", false, "Include agent/subagent conversations")
+	listCmd.Flags().BoolVarP(&listAgents, "agents", "a", true, "Include agent/subagent conversations (default: true)")
 	listCmd.Flags().StringVarP(&listProject, "project", "p", "", "Filter by project path")
 	listCmd.Flags().IntVarP(&listLimit, "limit", "n", 50, "Limit number of results")
 	listCmd.Flags().BoolVarP(&listGlobal, "global", "g", false, "List from all projects")

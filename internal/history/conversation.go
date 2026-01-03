@@ -170,3 +170,13 @@ func (c *Conversation) GetAssistantMessages() []*jsonl.RawEntry {
 	}
 	return messages
 }
+
+// ParseMessageEntry parses a raw entry into a Message struct.
+func ParseMessageEntry(entry *jsonl.RawEntry) (*jsonl.Message, error) {
+	return jsonl.ParseMessage(entry)
+}
+
+// ExtractMessageText extracts text content from a parsed message.
+func ExtractMessageText(msg *jsonl.Message) string {
+	return jsonl.ExtractText(msg)
+}

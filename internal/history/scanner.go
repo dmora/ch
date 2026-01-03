@@ -1,10 +1,14 @@
 package history
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
+
+	"github.com/dmora/ch/internal/jsonl"
 )
 
 // ScannerOptions configures the conversation scanner.
@@ -220,4 +224,130 @@ func (s *Scanner) FindAgents(projectDir, sessionID string) ([]*ConversationMeta,
 	})
 
 	return agents, nil
+}
+
+// AgentInfo contains detailed information about an agent extracted from parent conversation.
+type AgentInfo struct {
+	AgentID     string // Agent ID (from agent file)
+	SubagentType string // Type of agent (e.g., "Explore", "Plan")
+	Prompt      string // The prompt passed to the Task tool
+	Description string // Short description from Task tool
+}
+
+// ExtractAgentInfo extracts agent type and prompt from a parent conversation.
+// It finds the Task tool_use block that spawned the given agent.
+func ExtractAgentInfo(parentPath, agentID string) (*AgentInfo, error) {
+	conv, err := LoadConversation(parentPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Normalize agent ID (remove "agent-" prefix if present)
+	normalizedID := strings.TrimPrefix(agentID, "agent-")
+
+	// Search through all entries for Task tool calls
+	for _, entry := range conv.Entries {
+		if entry.Type != jsonl.EntryTypeAssistant || entry.Message == nil {
+			continue
+		}
+
+		msg, err := jsonl.ParseMessage(entry)
+		if err != nil || msg == nil {
+			continue
+		}
+
+		// Look for Task tool calls
+		for _, block := range msg.Content {
+			if block.Type != jsonl.BlockTypeToolUse || block.Name != "Task" {
+				continue
+			}
+
+			// Parse the input to check if this is our agent
+			if block.Input == nil {
+				continue
+			}
+
+			var input map[string]interface{}
+			if err := json.Unmarshal(block.Input, &input); err != nil {
+				continue
+			}
+
+			// Check if this Task spawned our agent by looking at the tool ID
+			// The tool ID often matches or contains the agent ID
+			if block.ID != "" && strings.Contains(block.ID, normalizedID) {
+				info := &AgentInfo{AgentID: agentID}
+				if st, ok := input["subagent_type"].(string); ok {
+					info.SubagentType = st
+				}
+				if p, ok := input["prompt"].(string); ok {
+					info.Prompt = p
+				}
+				if d, ok := input["description"].(string); ok {
+					info.Description = d
+				}
+				return info, nil
+			}
+		}
+	}
+
+	// If we didn't find a direct ID match, try matching by subagent_type pattern
+	// Sometimes the agent ID and tool ID don't match directly
+	return nil, nil
+}
+
+// FindAgentsWithType finds agents matching a specific subagent_type.
+func (s *Scanner) FindAgentsWithType(projectDir, sessionID, agentType string) ([]*ConversationMeta, error) {
+	agents, err := s.FindAgents(projectDir, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	if agentType == "" {
+		return agents, nil
+	}
+
+	// Find parent conversation path
+	parentPath := filepath.Join(projectDir, sessionID+".jsonl")
+
+	// Filter agents by type
+	var filtered []*ConversationMeta
+	for _, agent := range agents {
+		info, err := ExtractAgentInfo(parentPath, agent.ID)
+		if err != nil {
+			continue
+		}
+		if info != nil && info.SubagentType == agentType {
+			filtered = append(filtered, agent)
+		}
+	}
+
+	return filtered, nil
+}
+
+// GetAgentTypes returns all unique agent types for a conversation's agents.
+func (s *Scanner) GetAgentTypes(projectDir, sessionID string) ([]string, error) {
+	agents, err := s.FindAgents(projectDir, sessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	parentPath := filepath.Join(projectDir, sessionID+".jsonl")
+	typeSet := make(map[string]bool)
+
+	for _, agent := range agents {
+		info, err := ExtractAgentInfo(parentPath, agent.ID)
+		if err != nil || info == nil {
+			continue
+		}
+		if info.SubagentType != "" {
+			typeSet[info.SubagentType] = true
+		}
+	}
+
+	var types []string
+	for t := range typeSet {
+		types = append(types, t)
+	}
+	sort.Strings(types)
+	return types, nil
 }

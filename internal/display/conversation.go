@@ -314,7 +314,7 @@ func (d *ConversationDisplay) renderBlock(block *jsonl.ContentBlock) {
 }
 
 // RenderAgentList renders a list of agents for a conversation.
-func RenderAgentList(w io.Writer, agents []*history.ConversationMeta, parentID string, asJSON bool) error {
+func RenderAgentList(w io.Writer, agents []*history.ConversationMeta, parentID string, asJSON bool, filter string) error {
 	if asJSON {
 		type jsonAgent struct {
 			ID        string `json:"id"`
@@ -339,12 +339,20 @@ func RenderAgentList(w io.Writer, agents []*history.ConversationMeta, parentID s
 	}
 
 	if len(agents) == 0 {
-		fmt.Fprintln(w, Dim("No agents found for this conversation"))
+		if filter != "" {
+			fmt.Fprintf(w, "%s\n", Dim(fmt.Sprintf("No agents of type '%s' found for this conversation", filter)))
+		} else {
+			fmt.Fprintln(w, Dim("No agents found for this conversation"))
+		}
 		return nil
 	}
 
 	fmt.Fprintf(w, "\n%s %s\n", Title("Agents for conversation"), ID(history.ShortID(parentID)))
-	fmt.Fprintf(w, "%s\n\n", Dim(fmt.Sprintf("Found %d agent(s)", len(agents))))
+	if filter != "" {
+		fmt.Fprintf(w, "%s\n\n", Dim(fmt.Sprintf("Found %d agent(s) of type '%s'", len(agents), filter)))
+	} else {
+		fmt.Fprintf(w, "%s\n\n", Dim(fmt.Sprintf("Found %d agent(s)", len(agents))))
+	}
 
 	for i, a := range agents {
 		fmt.Fprintf(w, "%d. %s  %s  %s\n",

@@ -36,7 +36,7 @@ func init() {
 	searchCmd.Flags().BoolVarP(&searchGlobal, "global", "g", false, "Search in all projects")
 	searchCmd.Flags().BoolVarP(&searchCaseSensitive, "case-sensitive", "c", false, "Case-sensitive search")
 	searchCmd.Flags().BoolVar(&searchJSON, "json", false, "Output as JSON")
-	searchCmd.Flags().BoolVarP(&searchAgents, "agents", "a", false, "Include agent conversations")
+	searchCmd.Flags().BoolVarP(&searchAgents, "agents", "a", true, "Include agent conversations (default: true)")
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -57,7 +57,23 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 	// Determine project filter
 	if searchProject != "" {
-		opts.ProjectPath = searchProject
+		// Try to resolve project path (supports fuzzy matching)
+		resolvedPath, ambiguous, err := history.ResolveProjectPath(cfg.ProjectsDir, searchProject)
+		if err != nil {
+			return fmt.Errorf("resolving project: %w", err)
+		}
+		if len(ambiguous) > 0 {
+			// Multiple matches - show them to user
+			fmt.Fprintf(os.Stdout, "%s\n\n", display.Dim(fmt.Sprintf("Multiple projects match '%s':", searchProject)))
+			for i, p := range ambiguous {
+				fmt.Fprintf(os.Stdout, "  %d. %s\n", i+1, p.Path)
+			}
+			fmt.Fprintf(os.Stdout, "\n%s\n", display.Dim("Please use a more specific project path or name."))
+			return nil
+		}
+		opts.ProjectPath = resolvedPath
+		// Update searchProject for display
+		searchProject = resolvedPath
 	} else if !searchGlobal {
 		// Default to current directory's project
 		cwd, err := os.Getwd()

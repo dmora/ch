@@ -8,8 +8,9 @@ import (
 	"os"
 )
 
-// MaxScannerBuffer is the maximum buffer size for the scanner (10MB).
-const MaxScannerBuffer = 10 * 1024 * 1024
+// MaxScannerBuffer is the maximum buffer size for the scanner (100MB).
+// Large conversations with many tool calls can exceed 10MB per line.
+const MaxScannerBuffer = 100 * 1024 * 1024
 
 // Parser provides streaming parsing of JSONL files.
 type Parser struct {

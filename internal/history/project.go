@@ -1,9 +1,11 @@
 package history
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // Project represents a Claude Code project.
@@ -110,6 +112,59 @@ type ProjectStats struct {
 	TotalSize         int64
 	OldestTimestamp   string
 	NewestTimestamp   string
+}
+
+// ResolveProjectPath resolves a project path or name to a full path.
+// If the input is an existing path, it's returned as-is.
+// If it's a partial name, it searches for matching projects.
+// Returns the path, a list of ambiguous matches (if multiple), and an error.
+func ResolveProjectPath(projectsDir, pathOrName string) (string, []*Project, error) {
+	if projectsDir == "" {
+		projectsDir = DefaultProjectsDir()
+	}
+
+	// Check if it's already a valid path
+	if filepath.IsAbs(pathOrName) {
+		_, err := os.Stat(pathOrName)
+		if err == nil {
+			return pathOrName, nil, nil
+		}
+	}
+
+	// List all projects and search for matches
+	projects, err := ListProjects(projectsDir)
+	if err != nil {
+		return "", nil, err
+	}
+
+	var matches []*Project
+	lowerName := strings.ToLower(pathOrName)
+
+	for _, p := range projects {
+		// Check for exact match on path
+		if p.Path == pathOrName {
+			return p.Path, nil, nil
+		}
+		// Check for exact match on encoded name
+		if p.Name == pathOrName {
+			return p.Path, nil, nil
+		}
+		// Check for partial match on path (case-insensitive)
+		if strings.Contains(strings.ToLower(p.Path), lowerName) {
+			matches = append(matches, p)
+		}
+	}
+
+	if len(matches) == 0 {
+		return "", nil, fmt.Errorf("no project found matching '%s'", pathOrName)
+	}
+
+	if len(matches) == 1 {
+		return matches[0].Path, nil, nil
+	}
+
+	// Multiple matches - return them for user to choose
+	return "", matches, nil
 }
 
 // GetProjectStats calculates statistics for a project.

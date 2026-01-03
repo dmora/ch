@@ -21,10 +21,14 @@ The id should be a main conversation ID (not an agent ID).`,
 	RunE:    runAgents,
 }
 
-var agentsJSON bool
+var (
+	agentsJSON   bool
+	agentsFilter string
+)
 
 func init() {
 	agentsCmd.Flags().BoolVar(&agentsJSON, "json", false, "Output as JSON")
+	agentsCmd.Flags().StringVarP(&agentsFilter, "filter", "f", "", "Filter by agent type (exact match)")
 }
 
 func runAgents(cmd *cobra.Command, args []string) error {
@@ -51,17 +55,26 @@ func runAgents(cmd *cobra.Command, args []string) error {
 		sessionID = conv.Meta.ID
 	}
 
-	// Find all agents for this session
+	// Find agents for this session
 	projectDir := filepath.Dir(path)
 	scanner := history.NewScanner(history.ScannerOptions{
 		ProjectsDir: cfg.ProjectsDir,
 	})
 
-	agents, err := scanner.FindAgents(projectDir, sessionID)
-	if err != nil {
-		return fmt.Errorf("finding agents: %w", err)
+	var agents []*history.ConversationMeta
+	if agentsFilter != "" {
+		// Filter by agent type
+		agents, err = scanner.FindAgentsWithType(projectDir, sessionID, agentsFilter)
+		if err != nil {
+			return fmt.Errorf("finding agents: %w", err)
+		}
+	} else {
+		agents, err = scanner.FindAgents(projectDir, sessionID)
+		if err != nil {
+			return fmt.Errorf("finding agents: %w", err)
+		}
 	}
 
-	// Render
-	return display.RenderAgentList(os.Stdout, agents, sessionID, agentsJSON)
+	// Render with filter context
+	return display.RenderAgentList(os.Stdout, agents, sessionID, agentsJSON, agentsFilter)
 }

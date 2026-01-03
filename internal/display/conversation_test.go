@@ -162,7 +162,7 @@ func TestRenderAgentList(t *testing.T) {
 
 	t.Run("table output", func(t *testing.T) {
 		var buf bytes.Buffer
-		err := RenderAgentList(&buf, agents, "parent123", false)
+		err := RenderAgentList(&buf, agents, "parent123", false, "")
 		if err != nil {
 			t.Fatalf("RenderAgentList() error = %v", err)
 		}
@@ -174,7 +174,7 @@ func TestRenderAgentList(t *testing.T) {
 
 	t.Run("JSON output", func(t *testing.T) {
 		var buf bytes.Buffer
-		err := RenderAgentList(&buf, agents, "parent123", true)
+		err := RenderAgentList(&buf, agents, "parent123", true, "")
 		if err != nil {
 			t.Fatalf("RenderAgentList() error = %v", err)
 		}
@@ -190,12 +190,23 @@ func TestRenderAgentList(t *testing.T) {
 
 	t.Run("empty list", func(t *testing.T) {
 		var buf bytes.Buffer
-		err := RenderAgentList(&buf, []*history.ConversationMeta{}, "parent123", false)
+		err := RenderAgentList(&buf, []*history.ConversationMeta{}, "parent123", false, "")
 		if err != nil {
 			t.Fatalf("RenderAgentList() error = %v", err)
 		}
 		if !bytes.Contains(buf.Bytes(), []byte("No agents")) {
 			t.Error("Expected 'No agents' message for empty list")
+		}
+	})
+
+	t.Run("empty list with filter", func(t *testing.T) {
+		var buf bytes.Buffer
+		err := RenderAgentList(&buf, []*history.ConversationMeta{}, "parent123", false, "test-type")
+		if err != nil {
+			t.Fatalf("RenderAgentList() error = %v", err)
+		}
+		if !bytes.Contains(buf.Bytes(), []byte("test-type")) {
+			t.Error("Expected filter type in 'No agents' message")
 		}
 	})
 }
