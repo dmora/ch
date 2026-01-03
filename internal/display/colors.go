@@ -25,6 +25,11 @@ func DisableColorIfNotTTY() {
 	}
 }
 
+// IsColorEnabled returns true if color output is enabled.
+func IsColorEnabled() bool {
+	return !color.NoColor
+}
+
 // Color shortcuts
 var (
 	// Headers and titles
