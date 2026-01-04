@@ -14,9 +14,10 @@ import (
 
 // TableOptions configures table output.
 type TableOptions struct {
-	Writer    io.Writer
-	ShowAgent bool // Show agent indicator
-	JSON      bool // Output as JSON
+	Writer      io.Writer
+	ShowAgent   bool // Show agent indicator
+	JSON        bool // Output as JSON
+	ShowIndices bool // Show message indices in search results
 
 	// Context for headers/footers
 	ProjectPath    string // Current project path (empty if global)
@@ -327,21 +328,23 @@ func (t *SearchResultTable) Render(results []*history.SearchResult) error {
 
 func (t *SearchResultTable) renderJSON(results []*history.SearchResult) error {
 	type jsonResult struct {
-		ID         string   `json:"id"`
-		Project    string   `json:"project"`
-		MatchCount int      `json:"match_count"`
-		Previews   []string `json:"previews"`
-		Path       string   `json:"path"`
+		ID             string   `json:"id"`
+		Project        string   `json:"project"`
+		MatchCount     int      `json:"match_count"`
+		MessageIndices []int    `json:"message_indices,omitempty"`
+		Previews       []string `json:"previews"`
+		Path           string   `json:"path"`
 	}
 
 	output := make([]jsonResult, len(results))
 	for i, r := range results {
 		output[i] = jsonResult{
-			ID:         r.Meta.ID,
-			Project:    r.Meta.ProjectPath,
-			MatchCount: r.MatchCount,
-			Previews:   r.Previews,
-			Path:       r.Meta.Path,
+			ID:             r.Meta.ID,
+			Project:        r.Meta.ProjectPath,
+			MatchCount:     r.MatchCount,
+			MessageIndices: r.MessageIndices,
+			Previews:       r.Previews,
+			Path:           r.Meta.Path,
 		}
 	}
 
@@ -381,6 +384,13 @@ func (t *SearchResultTable) renderTable(results []*history.SearchResult) error {
 			Match(fmt.Sprintf("[%d matches]", r.MatchCount)),
 		)
 
+		// Show message indices if enabled
+		if t.opts.ShowIndices && len(r.MessageIndices) > 0 {
+			fmt.Fprintf(t.opts.Writer, "  %s %s\n",
+				Dim("Messages:"),
+				formatMessageIndices(r.MessageIndices))
+		}
+
 		// Previews
 		for _, preview := range r.Previews {
 			fmt.Fprintf(t.opts.Writer, "  %s\n", preview)
@@ -388,4 +398,24 @@ func (t *SearchResultTable) renderTable(results []*history.SearchResult) error {
 	}
 
 	return nil
+}
+
+// formatMessageIndices formats a list of message indices for display.
+func formatMessageIndices(indices []int) string {
+	if len(indices) == 0 {
+		return ""
+	}
+	if len(indices) <= 5 {
+		parts := make([]string, len(indices))
+		for i, idx := range indices {
+			parts[i] = fmt.Sprintf("%d", idx)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+	}
+	// Truncate for many matches
+	parts := make([]string, 5)
+	for i := 0; i < 5; i++ {
+		parts[i] = fmt.Sprintf("%d", indices[i])
+	}
+	return fmt.Sprintf("[%s, ... +%d more]", strings.Join(parts, ", "), len(indices)-5)
 }

@@ -28,6 +28,7 @@ var (
 	searchCaseSensitive bool
 	searchJSON          bool
 	searchAgents        bool
+	searchShowIndices   bool
 )
 
 func init() {
@@ -37,6 +38,7 @@ func init() {
 	searchCmd.Flags().BoolVarP(&searchCaseSensitive, "case-sensitive", "c", false, "Case-sensitive search")
 	searchCmd.Flags().BoolVar(&searchJSON, "json", false, "Output as JSON")
 	searchCmd.Flags().BoolVarP(&searchAgents, "agents", "a", true, "Include agent conversations (default: true)")
+	searchCmd.Flags().BoolVar(&searchShowIndices, "show-indices", false, "Show message indices in output")
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -101,9 +103,10 @@ func runSearch(cmd *cobra.Command, args []string) error {
 
 	// Render results
 	table := display.NewSearchResultTable(display.TableOptions{
-		Writer: os.Stdout,
-		JSON:   searchJSON,
-		Query:  query,
+		Writer:      os.Stdout,
+		JSON:        searchJSON,
+		ShowIndices: searchShowIndices,
+		Query:       query,
 	})
 
 	return table.Render(results)

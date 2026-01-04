@@ -27,16 +27,21 @@ The id can be:
 }
 
 var (
-	showThinking bool
-	showTools    bool
-	showJSON     bool
-	showRaw      bool
-	showPrompt   bool
-	showResult   bool
-	showFirst    int
-	showLast     int
-	showRange    string
-	showSummary  bool
+	showThinking   bool
+	showTools      bool
+	showJSON       bool
+	showRaw        bool
+	showPrompt     bool
+	showResult     bool
+	showFirst      int
+	showLast       int
+	showRange      string
+	showSummary    bool
+	showNumbered   bool
+	showRole       string
+	showFitTokens  int
+	showAfterIndex int
+	showLimit      int
 )
 
 func init() {
@@ -52,6 +57,13 @@ func init() {
 	showCmd.Flags().IntVar(&showLast, "last", 0, "Show last N messages")
 	showCmd.Flags().StringVar(&showRange, "range", "", "Show messages in range X-Y (1-based)")
 	showCmd.Flags().BoolVar(&showSummary, "summary", false, "Show only summary entries")
+
+	// Agent UX flags
+	showCmd.Flags().BoolVar(&showNumbered, "numbered", false, "Show message indices [N] prefix")
+	showCmd.Flags().StringVar(&showRole, "role", "", "Filter by role: user, assistant, or system")
+	showCmd.Flags().IntVar(&showFitTokens, "fit-tokens", 0, "Auto-select messages to fit token budget")
+	showCmd.Flags().IntVar(&showAfterIndex, "after-index", 0, "Start after message N (cursor pagination)")
+	showCmd.Flags().IntVar(&showLimit, "limit", 0, "Max messages to show (with --after-index)")
 }
 
 // FileSizeWarningThreshold is the size (5MB) above which we warn about large files.
@@ -65,6 +77,8 @@ func validatePaginationFlags() error {
 	}{
 		{"--first/--last", showFirst > 0 || showLast > 0},
 		{"--range", showRange != ""},
+		{"--fit-tokens", showFitTokens > 0},
+		{"--after-index/--limit", showAfterIndex > 0 || showLimit > 0},
 		{"--summary", showSummary},
 		{"--prompt", showPrompt},
 		{"--result", showResult},
@@ -82,6 +96,15 @@ func validatePaginationFlags() error {
 	if setCount > 1 {
 		return fmt.Errorf("flags %s are mutually exclusive", strings.Join(setNames, ", "))
 	}
+
+	// Validate role filter
+	if showRole != "" {
+		validRoles := map[string]bool{"user": true, "assistant": true, "system": true}
+		if !validRoles[showRole] {
+			return fmt.Errorf("invalid role: %s (must be user, assistant, or system)", showRole)
+		}
+	}
+
 	return nil
 }
 
@@ -115,10 +138,11 @@ func checkFileSizeWarning(path string) {
 		return
 	}
 
-	hasPagination := showFirst > 0 || showLast > 0 || showRange != "" || showSummary || showPrompt || showResult
+	hasPagination := showFirst > 0 || showLast > 0 || showRange != "" || showSummary || showPrompt || showResult ||
+		showFitTokens > 0 || showAfterIndex > 0 || showLimit > 0
 
 	if info.Size() > FileSizeWarningThreshold && !hasPagination && !showJSON && !showRaw {
-		fmt.Fprintf(os.Stderr, "%s Large file (%s). Consider using --first, --last, --range, or --summary for better performance.\n\n",
+		fmt.Fprintf(os.Stderr, "%s Large file (%s). Consider using --first, --last, --range, --fit-tokens, or --after-index for better performance.\n\n",
 			display.Warning("Warning:"),
 			display.FormatBytes(info.Size()))
 	}
@@ -199,7 +223,12 @@ func runShow(cmd *cobra.Command, args []string) error {
 
 	// Build pagination options
 	var paginationOpts display.PaginationOptions
-	if showFirst > 0 || showLast > 0 {
+	if showAfterIndex > 0 || showLimit > 0 {
+		paginationOpts.AfterIndex = showAfterIndex
+		paginationOpts.Limit = showLimit
+	} else if showFitTokens > 0 {
+		paginationOpts.FitTokens = showFitTokens
+	} else if showFirst > 0 || showLast > 0 {
 		paginationOpts.First = showFirst
 		paginationOpts.Last = showLast
 	} else if showRange != "" {
@@ -221,13 +250,15 @@ func runShow(cmd *cobra.Command, args []string) error {
 
 	// Display
 	disp := display.NewConversationDisplay(display.ConversationDisplayOptions{
-		Writer:       os.Stdout,
-		ShowThinking: showThinking,
-		ShowTools:    showTools,
-		JSON:         showJSON,
-		Raw:          showRaw,
-		AgentCount:   agentCount,
-		Pagination:   paginationOpts,
+		Writer:        os.Stdout,
+		ShowThinking:  showThinking,
+		ShowTools:     showTools,
+		ShowNumbering: showNumbered,
+		RoleFilter:    showRole,
+		JSON:          showJSON,
+		Raw:           showRaw,
+		AgentCount:    agentCount,
+		Pagination:    paginationOpts,
 	})
 
 	return disp.Render(conv)

@@ -18,22 +18,27 @@ type PaginationOptions struct {
 	Last       int // Show last N messages (0 = no limit)
 	RangeStart int // Start of range (1-based, 0 = not set)
 	RangeEnd   int // End of range (1-based, 0 = not set)
+	FitTokens  int // Auto-select messages to fit token budget (0 = disabled)
+	AfterIndex int // Start after message N for cursor pagination (0 = start from beginning)
+	Limit      int // Max messages to show with AfterIndex (0 = no limit)
 }
 
 // IsSet returns true if any pagination option is configured.
 func (p PaginationOptions) IsSet() bool {
-	return p.First > 0 || p.Last > 0 || p.RangeStart > 0
+	return p.First > 0 || p.Last > 0 || p.RangeStart > 0 || p.FitTokens > 0 || p.AfterIndex > 0 || p.Limit > 0
 }
 
 // ConversationDisplayOptions configures conversation display.
 type ConversationDisplayOptions struct {
-	Writer       io.Writer
-	ShowThinking bool              // Include thinking blocks
-	ShowTools    bool              // Include tool calls
-	JSON         bool              // Output as JSON
-	Raw          bool              // Output raw JSONL
-	AgentCount   int               // Number of agents spawned by this conversation
-	Pagination   PaginationOptions // Pagination controls
+	Writer        io.Writer
+	ShowThinking  bool              // Include thinking blocks
+	ShowTools     bool              // Include tool calls
+	ShowNumbering bool              // Show message indices [N] prefix
+	RoleFilter    string            // Filter by role: user, assistant, system (empty = all)
+	JSON          bool              // Output as JSON
+	Raw           bool              // Output raw JSONL
+	AgentCount    int               // Number of agents spawned by this conversation
+	Pagination    PaginationOptions // Pagination controls
 }
 
 // DefaultConversationDisplayOptions returns default display options.
@@ -184,10 +189,14 @@ func (d *ConversationDisplay) renderJSON(conv *history.Conversation) error {
 // Only counts user/assistant/system entries as "messages".
 // Returns (filtered messages, hasGap bool).
 func (d *ConversationDisplay) filterMessages(entries []*jsonl.RawEntry) ([]*jsonl.RawEntry, bool) {
-	// First, extract only message entries
+	// First, extract only message entries (with optional role filter)
 	var messages []*jsonl.RawEntry
 	for _, entry := range entries {
 		if entry.Type.IsMessage() {
+			// Apply role filter if specified
+			if d.opts.RoleFilter != "" && string(entry.Type) != d.opts.RoleFilter {
+				continue
+			}
 			messages = append(messages, entry)
 		}
 	}
@@ -197,6 +206,16 @@ func (d *ConversationDisplay) filterMessages(entries []*jsonl.RawEntry) ([]*json
 	}
 
 	totalMessages := len(messages)
+
+	// Handle cursor pagination (--after-index, --limit)
+	if d.opts.Pagination.AfterIndex > 0 || d.opts.Pagination.Limit > 0 {
+		return d.applyCursorPagination(messages)
+	}
+
+	// Handle --fit-tokens
+	if d.opts.Pagination.FitTokens > 0 {
+		return d.fitToTokenBudget(messages, d.opts.Pagination.FitTokens)
+	}
 
 	// Handle --range X-Y
 	if d.opts.Pagination.RangeStart > 0 {
@@ -250,6 +269,64 @@ func (d *ConversationDisplay) filterMessages(entries []*jsonl.RawEntry) ([]*json
 	return messages, false
 }
 
+// applyCursorPagination implements --after-index N --limit M cursor-based iteration.
+func (d *ConversationDisplay) applyCursorPagination(messages []*jsonl.RawEntry) ([]*jsonl.RawEntry, bool) {
+	afterIdx := d.opts.Pagination.AfterIndex
+	limit := d.opts.Pagination.Limit
+	total := len(messages)
+
+	// Start position: after message N means start at index N (0-based)
+	startPos := afterIdx
+	if startPos >= total {
+		return nil, false
+	}
+
+	endPos := total
+	if limit > 0 && startPos+limit < total {
+		endPos = startPos + limit
+	}
+
+	hasGapBefore := startPos > 0
+	return messages[startPos:endPos], hasGapBefore
+}
+
+// estimateTokens estimates the token count for a message.
+// Uses ~4 characters per token as a rough heuristic.
+func estimateTokens(entry *jsonl.RawEntry) int {
+	msg, err := jsonl.ParseMessage(entry)
+	if err != nil || msg == nil {
+		return 0
+	}
+	text := jsonl.ExtractText(msg)
+	return (len(text) + 3) / 4 // Ceiling division for ~4 chars/token
+}
+
+// fitToTokenBudget selects messages from the end to fit within token budget.
+func (d *ConversationDisplay) fitToTokenBudget(messages []*jsonl.RawEntry, budget int) ([]*jsonl.RawEntry, bool) {
+	if len(messages) == 0 {
+		return messages, false
+	}
+
+	totalTokens := 0
+	startIdx := len(messages)
+
+	// Work backwards from most recent
+	for i := len(messages) - 1; i >= 0; i-- {
+		tokens := estimateTokens(messages[i])
+		if totalTokens+tokens > budget {
+			break
+		}
+		totalTokens += tokens
+		startIdx = i
+	}
+
+	if startIdx == 0 {
+		return messages, false // Everything fits
+	}
+
+	return messages[startIdx:], true // hasGap = true, we omitted earlier messages
+}
+
 // renderGapIndicator renders a visual gap indicator between first and last messages.
 func (d *ConversationDisplay) renderGapIndicator(totalMessages, firstCount, lastCount int) {
 	omitted := totalMessages - firstCount - lastCount
@@ -268,6 +345,31 @@ func (d *ConversationDisplay) renderPaginationInfo(shown, total int) {
 		Number(fmt.Sprintf("%d of %d messages", shown, total)))
 }
 
+// renderCursorInfo shows cursor pagination status with next page hint.
+func (d *ConversationDisplay) renderCursorInfo(shown, total, afterIndex int) {
+	fmt.Fprintln(d.opts.Writer)
+	startIdx := afterIndex + 1
+	endIdx := afterIndex + shown
+	fmt.Fprintf(d.opts.Writer, "%s %s\n",
+		Dim("Showing:"),
+		Number(fmt.Sprintf("messages %d-%d of %d", startIdx, endIdx, total)))
+
+	if endIdx < total {
+		fmt.Fprintf(d.opts.Writer, "%s %s\n",
+			Dim("Next page:"),
+			ID(fmt.Sprintf("--after-index %d --limit %d", endIdx, shown)))
+	}
+}
+
+// renderFitTokensInfo shows auto-selected pagination info.
+func (d *ConversationDisplay) renderFitTokensInfo(shown, total, budget int) {
+	fmt.Fprintln(d.opts.Writer)
+	fmt.Fprintf(d.opts.Writer, "%s %s (token budget: ~%d)\n",
+		Dim("Auto-selected:"),
+		Number(fmt.Sprintf("last %d of %d messages", shown, total)),
+		budget)
+}
+
 func (d *ConversationDisplay) renderFormatted(conv *history.Conversation) error {
 	// Header
 	d.renderHeader(conv)
@@ -275,22 +377,26 @@ func (d *ConversationDisplay) renderFormatted(conv *history.Conversation) error 
 	// Apply pagination filtering
 	messages, hasGap := d.filterMessages(conv.Entries)
 
-	// Get total message count for gap indicator and pagination info
+	// Build index map for all messages to get correct indices
+	// Note: index is based on original position in conversation (before role filter)
+	indexMap := make(map[*jsonl.RawEntry]int)
 	totalMessages := 0
 	for _, e := range conv.Entries {
 		if e.Type.IsMessage() {
 			totalMessages++
+			indexMap[e] = totalMessages
 		}
 	}
 
 	// Render messages with gap if needed
-	if hasGap {
+	if hasGap && d.opts.Pagination.First > 0 && d.opts.Pagination.Last > 0 {
+		// First/last combined mode with gap
 		firstCount := d.opts.Pagination.First
 		lastCount := d.opts.Pagination.Last
 
 		// Render first N messages
 		for i := 0; i < firstCount && i < len(messages); i++ {
-			d.renderEntry(messages[i])
+			d.renderEntry(messages[i], indexMap[messages[i]])
 		}
 
 		// Render gap indicator
@@ -298,17 +404,32 @@ func (d *ConversationDisplay) renderFormatted(conv *history.Conversation) error 
 
 		// Render last M messages
 		for i := firstCount; i < len(messages); i++ {
-			d.renderEntry(messages[i])
+			d.renderEntry(messages[i], indexMap[messages[i]])
+		}
+	} else if hasGap {
+		// Other pagination modes with gap (cursor, fit-tokens) - show simple gap at start
+		omitted := totalMessages - len(messages)
+		fmt.Fprintln(d.opts.Writer)
+		fmt.Fprintf(d.opts.Writer, "%s\n", Dim(fmt.Sprintf("    ... %d earlier messages omitted ...", omitted)))
+		fmt.Fprintln(d.opts.Writer)
+
+		// Render all messages
+		for _, entry := range messages {
+			d.renderEntry(entry, indexMap[entry])
 		}
 	} else {
 		// No gap, render all filtered messages
 		for _, entry := range messages {
-			d.renderEntry(entry)
+			d.renderEntry(entry, indexMap[entry])
 		}
 	}
 
-	// Show pagination info if pagination was applied
-	if d.opts.Pagination.IsSet() {
+	// Show appropriate pagination info
+	if d.opts.Pagination.AfterIndex > 0 || d.opts.Pagination.Limit > 0 {
+		d.renderCursorInfo(len(messages), totalMessages, d.opts.Pagination.AfterIndex)
+	} else if d.opts.Pagination.FitTokens > 0 {
+		d.renderFitTokensInfo(len(messages), totalMessages, d.opts.Pagination.FitTokens)
+	} else if d.opts.Pagination.IsSet() {
 		d.renderPaginationInfo(len(messages), totalMessages)
 	}
 
@@ -365,7 +486,7 @@ func (d *ConversationDisplay) renderHeader(conv *history.Conversation) {
 	fmt.Fprintln(d.opts.Writer, strings.Repeat("─", 60))
 }
 
-func (d *ConversationDisplay) renderEntry(entry *jsonl.RawEntry) {
+func (d *ConversationDisplay) renderEntry(entry *jsonl.RawEntry, index int) {
 	msg, err := jsonl.ParseMessage(entry)
 	if err != nil || msg == nil {
 		return
@@ -399,6 +520,11 @@ func (d *ConversationDisplay) renderEntry(entry *jsonl.RawEntry) {
 	}
 
 	fmt.Fprintln(d.opts.Writer)
+
+	// Message index prefix (if enabled)
+	if d.opts.ShowNumbering && index > 0 {
+		fmt.Fprintf(d.opts.Writer, "%s ", Number(fmt.Sprintf("[%d]", index)))
+	}
 
 	// Role header
 	switch entry.Type {

@@ -11,9 +11,10 @@ import (
 
 // SearchResult represents a search match.
 type SearchResult struct {
-	Meta       *ConversationMeta
-	MatchCount int      // Number of matches in this conversation
-	Previews   []string // Preview snippets showing matches (first few)
+	Meta           *ConversationMeta
+	MatchCount     int      // Number of matches in this conversation
+	Previews       []string // Preview snippets showing matches (first few)
+	MessageIndices []int    // 1-based indices of messages containing matches
 }
 
 // SearchOptions configures the search.
@@ -112,8 +113,11 @@ func searchFile(path string, query string, caseSensitive bool) *SearchResult {
 
 	var matchCount int
 	var previews []string
+	var messageIndices []int
 	const maxPreviews = 3
 	const previewLen = 150
+
+	msgIndex := 0 // Track message index (1-based)
 
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 64*1024), jsonl.MaxScannerBuffer)
@@ -126,6 +130,8 @@ func searchFile(path string, query string, caseSensitive bool) *SearchResult {
 		if err != nil || !entry.Type.IsMessage() {
 			continue
 		}
+
+		msgIndex++ // Increment for each message entry
 
 		// Parse message and search in content
 		msg, err := jsonl.ParseMessage(entry)
@@ -151,6 +157,7 @@ func searchFile(path string, query string, caseSensitive bool) *SearchResult {
 		}
 
 		matchCount++
+		messageIndices = append(messageIndices, msgIndex)
 
 		// Extract preview if we need more
 		if len(previews) < maxPreviews {
@@ -172,9 +179,10 @@ func searchFile(path string, query string, caseSensitive bool) *SearchResult {
 	}
 
 	return &SearchResult{
-		Meta:       meta,
-		MatchCount: matchCount,
-		Previews:   previews,
+		Meta:           meta,
+		MatchCount:     matchCount,
+		Previews:       previews,
+		MessageIndices: messageIndices,
 	}
 }
 
