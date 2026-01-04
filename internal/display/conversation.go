@@ -12,14 +12,28 @@ import (
 	"github.com/dmora/ch/internal/jsonl"
 )
 
+// PaginationOptions controls message pagination for display.
+type PaginationOptions struct {
+	First      int // Show first N messages (0 = no limit)
+	Last       int // Show last N messages (0 = no limit)
+	RangeStart int // Start of range (1-based, 0 = not set)
+	RangeEnd   int // End of range (1-based, 0 = not set)
+}
+
+// IsSet returns true if any pagination option is configured.
+func (p PaginationOptions) IsSet() bool {
+	return p.First > 0 || p.Last > 0 || p.RangeStart > 0
+}
+
 // ConversationDisplayOptions configures conversation display.
 type ConversationDisplayOptions struct {
 	Writer       io.Writer
-	ShowThinking bool // Include thinking blocks
-	ShowTools    bool // Include tool calls
-	JSON         bool // Output as JSON
-	Raw          bool // Output raw JSONL
-	AgentCount   int  // Number of agents spawned by this conversation
+	ShowThinking bool              // Include thinking blocks
+	ShowTools    bool              // Include tool calls
+	JSON         bool              // Output as JSON
+	Raw          bool              // Output raw JSONL
+	AgentCount   int               // Number of agents spawned by this conversation
+	Pagination   PaginationOptions // Pagination controls
 }
 
 // DefaultConversationDisplayOptions returns default display options.
@@ -76,6 +90,7 @@ func (d *ConversationDisplay) renderRaw(conv *history.Conversation) error {
 func (d *ConversationDisplay) renderJSON(conv *history.Conversation) error {
 	type jsonMessage struct {
 		Type      string                 `json:"type"`
+		Index     int                    `json:"index,omitempty"` // 1-based message index
 		Timestamp string                 `json:"timestamp,omitempty"`
 		Role      string                 `json:"role,omitempty"`
 		Model     string                 `json:"model,omitempty"`
@@ -85,15 +100,32 @@ func (d *ConversationDisplay) renderJSON(conv *history.Conversation) error {
 		Raw       map[string]interface{} `json:"raw,omitempty"`
 	}
 
+	// Apply pagination filtering
+	filteredMessages, hasGap := d.filterMessages(conv.Entries)
+
+	// Build a map of filtered entries for quick lookup
+	filteredSet := make(map[*jsonl.RawEntry]bool)
+	for _, entry := range filteredMessages {
+		filteredSet[entry] = true
+	}
+
 	var messages []jsonMessage
+	msgIndex := 0
 
 	for _, entry := range conv.Entries {
 		if !entry.Type.IsMessage() {
 			continue
 		}
+		msgIndex++
+
+		// Skip if not in filtered set
+		if d.opts.Pagination.IsSet() && !filteredSet[entry] {
+			continue
+		}
 
 		jm := jsonMessage{
 			Type:      string(entry.Type),
+			Index:     msgIndex,
 			Timestamp: entry.Timestamp,
 		}
 
@@ -115,18 +147,32 @@ func (d *ConversationDisplay) renderJSON(conv *history.Conversation) error {
 		messages = append(messages, jm)
 	}
 
+	// Count total messages
+	totalMessages := 0
+	for _, e := range conv.Entries {
+		if e.Type.IsMessage() {
+			totalMessages++
+		}
+	}
+
 	output := struct {
-		ID        string        `json:"id"`
-		SessionID string        `json:"session_id"`
-		Project   string        `json:"project"`
-		IsAgent   bool          `json:"is_agent"`
-		Messages  []jsonMessage `json:"messages"`
+		ID            string        `json:"id"`
+		SessionID     string        `json:"session_id"`
+		Project       string        `json:"project"`
+		IsAgent       bool          `json:"is_agent"`
+		TotalMessages int           `json:"total_messages"`
+		ShownMessages int           `json:"shown_messages"`
+		HasGap        bool          `json:"has_gap,omitempty"`
+		Messages      []jsonMessage `json:"messages"`
 	}{
-		ID:        conv.Meta.ID,
-		SessionID: conv.Meta.SessionID,
-		Project:   conv.Meta.ProjectPath,
-		IsAgent:   conv.Meta.IsAgent,
-		Messages:  messages,
+		ID:            conv.Meta.ID,
+		SessionID:     conv.Meta.SessionID,
+		Project:       conv.Meta.ProjectPath,
+		IsAgent:       conv.Meta.IsAgent,
+		TotalMessages: totalMessages,
+		ShownMessages: len(messages),
+		HasGap:        hasGap,
+		Messages:      messages,
 	}
 
 	encoder := json.NewEncoder(d.opts.Writer)
@@ -134,16 +180,136 @@ func (d *ConversationDisplay) renderJSON(conv *history.Conversation) error {
 	return encoder.Encode(output)
 }
 
+// filterMessages applies pagination options to filter entries.
+// Only counts user/assistant/system entries as "messages".
+// Returns (filtered messages, hasGap bool).
+func (d *ConversationDisplay) filterMessages(entries []*jsonl.RawEntry) ([]*jsonl.RawEntry, bool) {
+	// First, extract only message entries
+	var messages []*jsonl.RawEntry
+	for _, entry := range entries {
+		if entry.Type.IsMessage() {
+			messages = append(messages, entry)
+		}
+	}
+
+	if !d.opts.Pagination.IsSet() {
+		return messages, false // no gap indicator needed
+	}
+
+	totalMessages := len(messages)
+
+	// Handle --range X-Y
+	if d.opts.Pagination.RangeStart > 0 {
+		start := d.opts.Pagination.RangeStart - 1 // Convert to 0-based
+		end := d.opts.Pagination.RangeEnd
+
+		if start >= totalMessages {
+			return nil, false
+		}
+		if end > totalMessages {
+			end = totalMessages
+		}
+
+		return messages[start:end], false
+	}
+
+	// Handle --first and/or --last
+	first := d.opts.Pagination.First
+	last := d.opts.Pagination.Last
+
+	// Only --first specified
+	if first > 0 && last == 0 {
+		if first >= totalMessages {
+			return messages, false
+		}
+		return messages[:first], false
+	}
+
+	// Only --last specified
+	if last > 0 && first == 0 {
+		if last >= totalMessages {
+			return messages, false
+		}
+		return messages[totalMessages-last:], false
+	}
+
+	// Both --first and --last specified
+	if first > 0 && last > 0 {
+		if first+last >= totalMessages {
+			// No gap needed, show all
+			return messages, false
+		}
+
+		// Return first N + last M (gap will be rendered between)
+		result := make([]*jsonl.RawEntry, 0, first+last)
+		result = append(result, messages[:first]...)
+		result = append(result, messages[totalMessages-last:]...)
+		return result, true // has gap
+	}
+
+	return messages, false
+}
+
+// renderGapIndicator renders a visual gap indicator between first and last messages.
+func (d *ConversationDisplay) renderGapIndicator(totalMessages, firstCount, lastCount int) {
+	omitted := totalMessages - firstCount - lastCount
+	fmt.Fprintln(d.opts.Writer)
+	fmt.Fprintf(d.opts.Writer, "%s\n", Dim(strings.Repeat("·", 40)))
+	fmt.Fprintf(d.opts.Writer, "%s\n",
+		Dim(fmt.Sprintf("    ... %d messages omitted ...", omitted)))
+	fmt.Fprintf(d.opts.Writer, "%s\n", Dim(strings.Repeat("·", 40)))
+}
+
+// renderPaginationInfo shows pagination status in output.
+func (d *ConversationDisplay) renderPaginationInfo(shown, total int) {
+	fmt.Fprintln(d.opts.Writer)
+	fmt.Fprintf(d.opts.Writer, "%s %s\n",
+		Dim("Showing:"),
+		Number(fmt.Sprintf("%d of %d messages", shown, total)))
+}
+
 func (d *ConversationDisplay) renderFormatted(conv *history.Conversation) error {
 	// Header
 	d.renderHeader(conv)
 
-	// Messages
-	for _, entry := range conv.Entries {
-		if !entry.Type.IsMessage() {
-			continue
+	// Apply pagination filtering
+	messages, hasGap := d.filterMessages(conv.Entries)
+
+	// Get total message count for gap indicator and pagination info
+	totalMessages := 0
+	for _, e := range conv.Entries {
+		if e.Type.IsMessage() {
+			totalMessages++
 		}
-		d.renderEntry(entry)
+	}
+
+	// Render messages with gap if needed
+	if hasGap {
+		firstCount := d.opts.Pagination.First
+		lastCount := d.opts.Pagination.Last
+
+		// Render first N messages
+		for i := 0; i < firstCount && i < len(messages); i++ {
+			d.renderEntry(messages[i])
+		}
+
+		// Render gap indicator
+		d.renderGapIndicator(totalMessages, firstCount, lastCount)
+
+		// Render last M messages
+		for i := firstCount; i < len(messages); i++ {
+			d.renderEntry(messages[i])
+		}
+	} else {
+		// No gap, render all filtered messages
+		for _, entry := range messages {
+			d.renderEntry(entry)
+		}
+	}
+
+	// Show pagination info if pagination was applied
+	if d.opts.Pagination.IsSet() {
+		d.renderPaginationInfo(len(messages), totalMessages)
 	}
 
 	// Footer with navigation hints

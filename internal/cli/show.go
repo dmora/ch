@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/dmora/ch/internal/display"
@@ -32,6 +33,10 @@ var (
 	showRaw      bool
 	showPrompt   bool
 	showResult   bool
+	showFirst    int
+	showLast     int
+	showRange    string
+	showSummary  bool
 )
 
 func init() {
@@ -41,16 +46,129 @@ func init() {
 	showCmd.Flags().BoolVar(&showRaw, "raw", false, "Output raw JSONL")
 	showCmd.Flags().BoolVar(&showPrompt, "prompt", false, "Show only the prompt that spawned this agent (agents only)")
 	showCmd.Flags().BoolVar(&showResult, "result", false, "Show only the final result from this agent (agents only)")
+
+	// Pagination flags
+	showCmd.Flags().IntVar(&showFirst, "first", 0, "Show first N messages")
+	showCmd.Flags().IntVar(&showLast, "last", 0, "Show last N messages")
+	showCmd.Flags().StringVar(&showRange, "range", "", "Show messages in range X-Y (1-based)")
+	showCmd.Flags().BoolVar(&showSummary, "summary", false, "Show only summary entries")
+}
+
+// FileSizeWarningThreshold is the size (5MB) above which we warn about large files.
+const FileSizeWarningThreshold = 5 * 1024 * 1024
+
+// validatePaginationFlags checks for mutually exclusive pagination flags.
+func validatePaginationFlags() error {
+	exclusiveFlags := []struct {
+		name  string
+		isSet bool
+	}{
+		{"--first/--last", showFirst > 0 || showLast > 0},
+		{"--range", showRange != ""},
+		{"--summary", showSummary},
+		{"--prompt", showPrompt},
+		{"--result", showResult},
+	}
+
+	setCount := 0
+	var setNames []string
+	for _, f := range exclusiveFlags {
+		if f.isSet {
+			setCount++
+			setNames = append(setNames, f.name)
+		}
+	}
+
+	if setCount > 1 {
+		return fmt.Errorf("flags %s are mutually exclusive", strings.Join(setNames, ", "))
+	}
+	return nil
+}
+
+// parseRange parses a range string "X-Y" into start and end indices (1-based).
+func parseRange(rangeStr string) (start, end int, err error) {
+	parts := strings.Split(rangeStr, "-")
+	if len(parts) != 2 {
+		return 0, 0, fmt.Errorf("invalid range format: expected X-Y, got %s", rangeStr)
+	}
+	start, err = strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid start index: %s", parts[0])
+	}
+	end, err = strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err != nil {
+		return 0, 0, fmt.Errorf("invalid end index: %s", parts[1])
+	}
+	if start < 1 || end < 1 {
+		return 0, 0, fmt.Errorf("range indices must be >= 1")
+	}
+	if start > end {
+		return 0, 0, fmt.Errorf("start index (%d) must be <= end index (%d)", start, end)
+	}
+	return start, end, nil
+}
+
+// checkFileSizeWarning warns if file is large and no pagination flags are set.
+func checkFileSizeWarning(path string) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return
+	}
+
+	hasPagination := showFirst > 0 || showLast > 0 || showRange != "" || showSummary || showPrompt || showResult
+
+	if info.Size() > FileSizeWarningThreshold && !hasPagination && !showJSON && !showRaw {
+		fmt.Fprintf(os.Stderr, "%s Large file (%s). Consider using --first, --last, --range, or --summary for better performance.\n\n",
+			display.Warning("Warning:"),
+			display.FormatBytes(info.Size()))
+	}
+}
+
+// showSummaries displays only summary entries from a conversation.
+func showSummaries(conv *history.Conversation) error {
+	summaries := conv.GetSummaries()
+
+	if len(summaries) == 0 {
+		fmt.Println(display.Dim("No summary entries found in this conversation"))
+		return nil
+	}
+
+	fmt.Printf("\n%s %s\n", display.Title("Summaries"), display.ID(conv.Meta.ID))
+	fmt.Printf("%s %d\n", display.Dim("Found:"), len(summaries))
+	fmt.Println(strings.Repeat("─", 60))
+
+	for i, entry := range summaries {
+		if i > 0 {
+			fmt.Println()
+		}
+		fmt.Printf("\n%s %d\n", display.Section("Summary"), i+1)
+		if entry.Timestamp != "" {
+			fmt.Printf("%s %s\n", display.Dim("Time:"), display.Timestamp(entry.Timestamp))
+		}
+		if entry.Summary != "" {
+			fmt.Println(entry.Summary)
+		}
+	}
+
+	return nil
 }
 
 func runShow(cmd *cobra.Command, args []string) error {
 	id := args[0]
+
+	// Validate pagination flags
+	if err := validatePaginationFlags(); err != nil {
+		return err
+	}
 
 	// Find the conversation file
 	path, err := findConversationFile(id)
 	if err != nil {
 		return err
 	}
+
+	// Check file size and warn if large without pagination
+	checkFileSizeWarning(path)
 
 	// Load the conversation
 	conv, err := history.LoadConversation(path)
@@ -74,6 +192,25 @@ func runShow(cmd *cobra.Command, args []string) error {
 		return showAgentResult(conv)
 	}
 
+	// Handle --summary flag
+	if showSummary {
+		return showSummaries(conv)
+	}
+
+	// Build pagination options
+	var paginationOpts display.PaginationOptions
+	if showFirst > 0 || showLast > 0 {
+		paginationOpts.First = showFirst
+		paginationOpts.Last = showLast
+	} else if showRange != "" {
+		start, end, err := parseRange(showRange)
+		if err != nil {
+			return err
+		}
+		paginationOpts.RangeStart = start
+		paginationOpts.RangeEnd = end
+	}
+
 	// Count agents for main conversations
 	agentCount := 0
 	if !conv.Meta.IsAgent {
@@ -90,6 +227,7 @@ func runShow(cmd *cobra.Command, args []string) error {
 		JSON:         showJSON,
 		Raw:          showRaw,
 		AgentCount:   agentCount,
+		Pagination:   paginationOpts,
 	})
 
 	return disp.Render(conv)

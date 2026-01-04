@@ -171,6 +171,17 @@ func (c *Conversation) GetAssistantMessages() []*jsonl.RawEntry {
 	return messages
 }
 
+// GetSummaries returns only summary type entries.
+func (c *Conversation) GetSummaries() []*jsonl.RawEntry {
+	var summaries []*jsonl.RawEntry
+	for _, entry := range c.Entries {
+		if entry.Type == jsonl.EntryTypeSummary {
+			summaries = append(summaries, entry)
+		}
+	}
+	return summaries
+}
+
 // ParseMessageEntry parses a raw entry into a Message struct.
 func ParseMessageEntry(entry *jsonl.RawEntry) (*jsonl.Message, error) {
 	return jsonl.ParseMessage(entry)
