@@ -20,6 +20,13 @@ func Execute() error {
 	return rootCmd.Execute()
 }
 
+// SetVersion sets the version string for the CLI.
+// Must be called before Execute() to take effect.
+func SetVersion(v string) {
+	Version = v
+	rootCmd.Version = v
+}
+
 var rootCmd = &cobra.Command{
 	Use:   "ch",
 	Short: "Claude History - view Claude Code conversation history",

@@ -17,10 +17,11 @@ var (
 
 func main() {
 	// Set version info for CLI
-	cli.Version = version
+	v := version
 	if commit != "none" && len(commit) > 7 {
-		cli.Version = fmt.Sprintf("%s (%s, %s)", version, commit[:7], date)
+		v = fmt.Sprintf("%s (%s, %s)", version, commit[:7], date)
 	}
+	cli.SetVersion(v)
 
 	if err := cli.Execute(); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
