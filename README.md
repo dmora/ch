@@ -2,6 +2,21 @@
 
 A memory-efficient Go CLI tool for viewing Claude Code conversation history, including subagent conversations.
 
+## Why ch?
+
+Claude Code's UI shows history for humans. `ch` exposes it for **agentic systems**:
+
+- **JSON output** for programmatic access (`--json` flag on all commands)
+- **Memory-efficient streaming** handles thousands of conversations without OOM
+- **Foundation for MCP server wrappers** - designed for AI-to-AI context retrieval
+- **Cross-project search** and filtering across all your Claude Code sessions
+
+## Disclaimer
+
+This tool accesses Claude Code's local conversation cache (`~/.claude/projects/`).
+This is **undocumented, unofficial, and not supported by Anthropic**. The data format
+may change without notice. Use at your own risk.
+
 ## Installation
 
 ```bash
