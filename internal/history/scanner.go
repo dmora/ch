@@ -242,11 +242,18 @@ func ExtractAgentInfo(parentPath, agentID string) (*AgentInfo, error) {
 		return nil, err
 	}
 
-	// Normalize agent ID (remove "agent-" prefix if present)
 	normalizedID := strings.TrimPrefix(agentID, "agent-")
+	block, input := findTaskToolCall(conv.Entries, normalizedID)
+	if block == nil {
+		return nil, nil
+	}
 
-	// Search through all entries for Task tool calls
-	for _, entry := range conv.Entries {
+	return parseAgentInput(agentID, input), nil
+}
+
+// findTaskToolCall searches entries for a Task tool call matching the given agent ID.
+func findTaskToolCall(entries []*jsonl.RawEntry, normalizedID string) (*jsonl.ContentBlock, map[string]interface{}) {
+	for _, entry := range entries {
 		if entry.Type != jsonl.EntryTypeAssistant || entry.Message == nil {
 			continue
 		}
@@ -256,43 +263,40 @@ func ExtractAgentInfo(parentPath, agentID string) (*AgentInfo, error) {
 			continue
 		}
 
-		// Look for Task tool calls
-		for _, block := range msg.Content {
+		for i := range msg.Content {
+			block := &msg.Content[i]
 			if block.Type != jsonl.BlockTypeToolUse || block.Name != "Task" {
 				continue
 			}
-
-			// Parse the input to check if this is our agent
-			if block.Input == nil {
+			if block.Input == nil || block.ID == "" {
+				continue
+			}
+			if !strings.Contains(block.ID, normalizedID) {
 				continue
 			}
 
 			var input map[string]interface{}
-			if err := json.Unmarshal(block.Input, &input); err != nil {
-				continue
-			}
-
-			// Check if this Task spawned our agent by looking at the tool ID
-			// The tool ID often matches or contains the agent ID
-			if block.ID != "" && strings.Contains(block.ID, normalizedID) {
-				info := &AgentInfo{AgentID: agentID}
-				if st, ok := input["subagent_type"].(string); ok {
-					info.SubagentType = st
-				}
-				if p, ok := input["prompt"].(string); ok {
-					info.Prompt = p
-				}
-				if d, ok := input["description"].(string); ok {
-					info.Description = d
-				}
-				return info, nil
+			if json.Unmarshal(block.Input, &input) == nil {
+				return block, input
 			}
 		}
 	}
-
-	// If we didn't find a direct ID match, try matching by subagent_type pattern
-	// Sometimes the agent ID and tool ID don't match directly
 	return nil, nil
+}
+
+// parseAgentInput extracts agent info from Task tool input.
+func parseAgentInput(agentID string, input map[string]interface{}) *AgentInfo {
+	info := &AgentInfo{AgentID: agentID}
+	if st, ok := input["subagent_type"].(string); ok {
+		info.SubagentType = st
+	}
+	if p, ok := input["prompt"].(string); ok {
+		info.Prompt = p
+	}
+	if d, ok := input["description"].(string); ok {
+		info.Description = d
+	}
+	return info
 }
 
 // FindAgentsWithType finds agents matching a specific subagent_type.

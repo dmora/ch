@@ -23,6 +23,11 @@ type Syncer struct {
 	dryRun      bool
 }
 
+// shouldRecord returns true if database operations should be performed.
+func (s *Syncer) shouldRecord() bool {
+	return !s.dryRun && s.db != nil
+}
+
 // SyncerOptions configures the syncer.
 type SyncerOptions struct {
 	DBPath      string
@@ -145,9 +150,78 @@ func (s *Syncer) SyncFile(ctx context.Context, path string) (int, error) {
 	return spans, err
 }
 
+// syncStrategy holds the determined sync approach for a file.
+type syncStrategy struct {
+	offset      int64
+	lineNum     int
+	needsResync bool
+}
+
+// determineSyncStrategy decides how to sync a file based on its state.
+func (s *Syncer) determineSyncStrategy(path string, currentSize, currentMtime int64) (*syncStrategy, error) {
+	strategy := &syncStrategy{}
+
+	if !s.shouldRecord() {
+		// No database: always full sync
+		strategy.needsResync = true
+		return strategy, nil
+	}
+
+	state, err := s.db.GetState(path)
+	if err != nil {
+		return nil, fmt.Errorf("getting state: %w", err)
+	}
+
+	if state == nil {
+		// New file: full sync
+		strategy.needsResync = true
+		return strategy, nil
+	}
+
+	if currentSize < state.LastSize {
+		// File shrunk: compaction detected, full resync
+		strategy.needsResync = true
+		s.db.ClearFileMessages(path)
+		s.db.DeleteState(path)
+		return strategy, nil
+	}
+
+	if currentMtime == state.LastMtime && currentSize == state.LastSize {
+		// No changes
+		return nil, nil
+	}
+
+	// Incremental sync from last offset
+	strategy.offset = state.LastOffset
+	strategy.lineNum = state.MessageCount
+	return strategy, nil
+}
+
+// processAndSendEntry processes a single entry, checking deduplication and sending to backend.
+// Returns true if the entry was sent (not skipped due to deduplication).
+func (s *Syncer) processAndSendEntry(ctx context.Context, entry *jsonl.RawEntry, span *Span, path string) (bool, error) {
+	if s.shouldRecord() {
+		hash := GenerateMessageHash(entry)
+		synced, _ := s.db.IsSynced(path, hash)
+		if synced {
+			return false, nil
+		}
+	}
+
+	if err := s.backend.SendSpan(ctx, span); err != nil {
+		return false, fmt.Errorf("sending span: %w", err)
+	}
+
+	if s.shouldRecord() {
+		hash := GenerateMessageHash(entry)
+		s.db.RecordSyncedMessage(path, hash, span.ID)
+	}
+
+	return true, nil
+}
+
 // syncFile syncs a single file and returns (spans synced, was updated, error).
 func (s *Syncer) syncFile(ctx context.Context, path string) (int, bool, error) {
-	// Get file info
 	info, err := os.Stat(path)
 	if err != nil {
 		return 0, false, fmt.Errorf("stat file: %w", err)
@@ -156,134 +230,105 @@ func (s *Syncer) syncFile(ctx context.Context, path string) (int, bool, error) {
 	currentSize := info.Size()
 	currentMtime := info.ModTime().Unix()
 
-	// Get existing state (only if not dry run)
-	var state *syncdb.SyncState
-	if !s.dryRun && s.db != nil {
-		state, err = s.db.GetState(path)
-		if err != nil {
-			return 0, false, fmt.Errorf("getting state: %w", err)
-		}
+	strategy, err := s.determineSyncStrategy(path, currentSize, currentMtime)
+	if err != nil {
+		return 0, false, err
+	}
+	if strategy == nil {
+		return 0, false, nil // No changes
 	}
 
-	// Determine sync strategy
-	var offset int64 = 0
-	needsResync := false
-
-	if state == nil {
-		// New file: full sync
-		needsResync = true
-	} else if currentSize < state.LastSize {
-		// File shrunk: compaction detected, full resync
-		needsResync = true
-		if !s.dryRun && s.db != nil {
-			s.db.ClearFileMessages(path)
-			s.db.DeleteState(path)
-		}
-	} else if currentMtime == state.LastMtime && currentSize == state.LastSize {
-		// No changes
-		return 0, false, nil
-	} else {
-		// Incremental sync from last offset
-		offset = state.LastOffset
-	}
-
-	_ = needsResync // Used for logging if needed
-
-	// Open file and seek to offset
 	file, err := os.Open(path)
 	if err != nil {
 		return 0, false, fmt.Errorf("opening file: %w", err)
 	}
 	defer file.Close()
 
-	if offset > 0 {
-		if _, err := file.Seek(offset, io.SeekStart); err != nil {
+	if strategy.offset > 0 {
+		if _, err := file.Seek(strategy.offset, io.SeekStart); err != nil {
 			return 0, false, fmt.Errorf("seeking to offset: %w", err)
 		}
 	}
 
-	// Parse and map entries
+	spansProcessed, traceID, lineNum, err := s.processEntries(ctx, file, path, strategy.lineNum)
+	if err != nil {
+		return spansProcessed, spansProcessed > 0, err
+	}
+
+	if err := s.saveState(file, path, currentSize, currentMtime, traceID, lineNum); err != nil {
+		return spansProcessed, true, err
+	}
+
+	return spansProcessed, spansProcessed > 0, nil
+}
+
+// processEntries reads and processes all entries from the file.
+func (s *Syncer) processEntries(ctx context.Context, file *os.File, path string, startLineNum int) (int, string, int, error) {
 	parser := jsonl.NewParserFromReader(file)
 	mapper := NewMapper(path)
 
-	lineNum := 0
-	if state != nil {
-		lineNum = state.MessageCount
-	}
-
+	lineNum := startLineNum
 	spansProcessed := 0
 	var traceID string
 
 	for {
 		entry, err := parser.Next()
 		if err != nil {
-			return spansProcessed, spansProcessed > 0, fmt.Errorf("parsing entry: %w", err)
+			return spansProcessed, traceID, lineNum, fmt.Errorf("parsing entry: %w", err)
 		}
 		if entry == nil {
-			break // EOF
+			break
 		}
 		lineNum++
 
-		// Extract trace ID from first entry with sessionID
 		if traceID == "" && entry.SessionID != "" {
 			traceID = entry.SessionID
 		}
 
-		// Map to span
 		span, err := mapper.MapEntry(entry, lineNum)
 		if err != nil {
-			// Log error but continue
 			if s.db != nil {
 				s.db.RecordError(path, err.Error())
 			}
 			continue
 		}
 		if span == nil {
-			continue // Entry doesn't produce a span
+			continue
 		}
 
-		// Check if already synced (for resumability) - only if not dry run
-		if !s.dryRun && s.db != nil {
-			hash := GenerateMessageHash(entry)
-			synced, _ := s.db.IsSynced(path, hash)
-			if synced {
-				continue
-			}
+		sent, err := s.processAndSendEntry(ctx, entry, span, path)
+		if err != nil {
+			return spansProcessed, traceID, lineNum, err
 		}
-
-		// Send to backend
-		if err := s.backend.SendSpan(ctx, span); err != nil {
-			return spansProcessed, spansProcessed > 0, fmt.Errorf("sending span: %w", err)
-		}
-
-		// Record synced message (only if not dry run)
-		if !s.dryRun && s.db != nil {
-			hash := GenerateMessageHash(entry)
-			s.db.RecordSyncedMessage(path, hash, span.ID)
-		}
-
-		spansProcessed++
-	}
-
-	// Update state (only if not dry run)
-	if !s.dryRun && s.db != nil {
-		newOffset, _ := file.Seek(0, io.SeekCurrent)
-		newState := &syncdb.SyncState{
-			FilePath:     path,
-			LastOffset:   newOffset,
-			LastSize:     currentSize,
-			LastMtime:    currentMtime,
-			TraceID:      traceID,
-			MessageCount: lineNum,
-			LastSyncAt:   time.Now().Unix(),
-			Backend:      s.backend.Name(),
-		}
-		if err := s.db.SaveState(newState); err != nil {
-			return spansProcessed, true, fmt.Errorf("saving state: %w", err)
+		if sent {
+			spansProcessed++
 		}
 	}
 
-	return spansProcessed, spansProcessed > 0, nil
+	return spansProcessed, traceID, lineNum, nil
+}
+
+// saveState persists the sync state to the database.
+func (s *Syncer) saveState(file *os.File, path string, currentSize, currentMtime int64, traceID string, lineNum int) error {
+	if !s.shouldRecord() {
+		return nil
+	}
+
+	newOffset, _ := file.Seek(0, io.SeekCurrent)
+	newState := &syncdb.SyncState{
+		FilePath:     path,
+		LastOffset:   newOffset,
+		LastSize:     currentSize,
+		LastMtime:    currentMtime,
+		TraceID:      traceID,
+		MessageCount: lineNum,
+		LastSyncAt:   time.Now().Unix(),
+		Backend:      s.backend.Name(),
+	}
+	if err := s.db.SaveState(newState); err != nil {
+		return fmt.Errorf("saving state: %w", err)
+	}
+	return nil
 }
 
 // findFiles finds all JSONL files in the projects directory.

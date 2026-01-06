@@ -46,6 +46,23 @@ func ScanConversationMeta(path string) (*ConversationMeta, error) {
 		return nil, err
 	}
 
+	meta := initMetaFromPath(path, info)
+	parser := jsonl.NewParserFromReader(file)
+	state := &metaScanState{}
+
+	for {
+		entry, err := parser.Next()
+		if err != nil || entry == nil {
+			break
+		}
+		updateMetaFromEntry(meta, entry, state)
+	}
+
+	return meta, nil
+}
+
+// initMetaFromPath creates initial metadata from file path and info.
+func initMetaFromPath(path string, info os.FileInfo) *ConversationMeta {
 	filename := filepath.Base(path)
 	projectDir := filepath.Base(filepath.Dir(path))
 
@@ -65,53 +82,63 @@ func ScanConversationMeta(path string) (*ConversationMeta, error) {
 		meta.SessionID = meta.ID
 	}
 
-	parser := jsonl.NewParserFromReader(file)
-	var firstUserFound bool
-	var firstTimestamp time.Time
+	return meta
+}
 
-	for {
-		entry, err := parser.Next()
-		if err != nil || entry == nil {
-			break
-		}
+// metaScanState tracks scanning progress across entries.
+type metaScanState struct {
+	firstUserFound   bool
+	firstTimestamp   time.Time
+}
 
-		// Extract session info from first entry
-		if meta.SessionID == "" && entry.SessionID != "" {
-			meta.SessionID = entry.SessionID
-		}
-		if meta.IsAgent && meta.ParentSessionID == "" && entry.SessionID != "" {
-			meta.ParentSessionID = entry.SessionID
-		}
+// updateMetaFromEntry updates metadata from a single entry.
+func updateMetaFromEntry(meta *ConversationMeta, entry *jsonl.RawEntry, state *metaScanState) {
+	updateSessionInfo(meta, entry)
+	updateTimestamp(meta, entry, state)
+	updateMessageStats(meta, entry, state)
+}
 
-		// Track timestamp from first entry
-		if entry.Timestamp != "" && firstTimestamp.IsZero() {
-			if t, err := time.Parse(time.RFC3339, entry.Timestamp); err == nil {
-				firstTimestamp = t
-				meta.Timestamp = t
-			}
-		}
+// updateSessionInfo extracts session info from entry.
+func updateSessionInfo(meta *ConversationMeta, entry *jsonl.RawEntry) {
+	if entry.SessionID == "" {
+		return
+	}
+	if meta.SessionID == "" {
+		meta.SessionID = entry.SessionID
+	}
+	if meta.IsAgent && meta.ParentSessionID == "" {
+		meta.ParentSessionID = entry.SessionID
+	}
+}
 
-		// Count messages
-		if entry.Type.IsUserOrAssistant() {
-			meta.MessageCount++
-		}
+// updateTimestamp updates timestamp from first entry with timestamp.
+func updateTimestamp(meta *ConversationMeta, entry *jsonl.RawEntry, state *metaScanState) {
+	if entry.Timestamp == "" || !state.firstTimestamp.IsZero() {
+		return
+	}
+	if t, err := time.Parse(time.RFC3339, entry.Timestamp); err == nil {
+		state.firstTimestamp = t
+		meta.Timestamp = t
+	}
+}
 
-		// Extract preview from first user message
-		if entry.Type == jsonl.EntryTypeUser && !firstUserFound {
-			meta.Preview = jsonl.ExtractPreview(entry.Message, 100)
-			firstUserFound = true
-		}
-
-		// Extract model from first assistant message
-		if entry.Type == jsonl.EntryTypeAssistant && meta.Model == "" && entry.Message != nil {
-			var msg jsonl.Message
-			if json.Unmarshal(entry.Message, &msg) == nil && msg.Model != "" {
-				meta.Model = msg.Model
-			}
-		}
+// updateMessageStats updates message count, preview, and model.
+func updateMessageStats(meta *ConversationMeta, entry *jsonl.RawEntry, state *metaScanState) {
+	if entry.Type.IsUserOrAssistant() {
+		meta.MessageCount++
 	}
 
-	return meta, nil
+	if entry.Type == jsonl.EntryTypeUser && !state.firstUserFound {
+		meta.Preview = jsonl.ExtractPreview(entry.Message, 100)
+		state.firstUserFound = true
+	}
+
+	if entry.Type == jsonl.EntryTypeAssistant && meta.Model == "" && entry.Message != nil {
+		var msg jsonl.Message
+		if json.Unmarshal(entry.Message, &msg) == nil && msg.Model != "" {
+			meta.Model = msg.Model
+		}
+	}
 }
 
 // LoadConversation fully loads a conversation from a JSONL file.

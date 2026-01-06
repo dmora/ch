@@ -180,75 +180,36 @@ func showSummaries(conv *history.Conversation) error {
 func runShow(cmd *cobra.Command, args []string) error {
 	id := args[0]
 
-	// Validate pagination flags
 	if err := validatePaginationFlags(); err != nil {
 		return err
 	}
 
-	// Find the conversation file
 	path, err := findConversationFile(id)
 	if err != nil {
 		return err
 	}
 
-	// Check file size and warn if large without pagination
 	checkFileSizeWarning(path)
 
-	// Load the conversation
 	conv, err := history.LoadConversation(path)
 	if err != nil {
 		return fmt.Errorf("loading conversation: %w", err)
 	}
 
-	// Handle --prompt flag (agents only)
-	if showPrompt {
-		if !conv.Meta.IsAgent {
-			return fmt.Errorf("--prompt flag only works for agent conversations")
-		}
-		return showAgentPrompt(conv, path)
+	if err := handleSpecialModes(conv, path); err != nil {
+		return err
+	}
+	if showPrompt || showResult || showSummary {
+		return nil // Special mode handled
 	}
 
-	// Handle --result flag (agents only)
-	if showResult {
-		if !conv.Meta.IsAgent {
-			return fmt.Errorf("--result flag only works for agent conversations")
-		}
-		return showAgentResult(conv)
+	paginationOpts, err := buildPaginationOpts()
+	if err != nil {
+		return err
 	}
 
-	// Handle --summary flag
-	if showSummary {
-		return showSummaries(conv)
-	}
+	agentCount := countAgentsIfMain(conv, path)
 
-	// Build pagination options
-	var paginationOpts display.PaginationOptions
-	if showAfterIndex > 0 || showLimit > 0 {
-		paginationOpts.AfterIndex = showAfterIndex
-		paginationOpts.Limit = showLimit
-	} else if showFitTokens > 0 {
-		paginationOpts.FitTokens = showFitTokens
-	} else if showFirst > 0 || showLast > 0 {
-		paginationOpts.First = showFirst
-		paginationOpts.Last = showLast
-	} else if showRange != "" {
-		start, end, err := parseRange(showRange)
-		if err != nil {
-			return err
-		}
-		paginationOpts.RangeStart = start
-		paginationOpts.RangeEnd = end
-	}
-
-	// Count agents for main conversations
-	agentCount := 0
-	if !conv.Meta.IsAgent {
-		projectDir := filepath.Dir(path)
-		scanner := history.NewScanner(history.ScannerOptions{ProjectsDir: cfg.ProjectsDir})
-		agentCount = scanner.CountAgents(projectDir, conv.Meta.SessionID)
-	}
-
-	// Display
 	disp := display.NewConversationDisplay(display.ConversationDisplayOptions{
 		Writer:        os.Stdout,
 		ShowThinking:  showThinking,
@@ -262,6 +223,60 @@ func runShow(cmd *cobra.Command, args []string) error {
 	})
 
 	return disp.Render(conv)
+}
+
+// handleSpecialModes handles --prompt, --result, and --summary flags.
+// Returns nil if handled, error if failed, or continues if not applicable.
+func handleSpecialModes(conv *history.Conversation, path string) error {
+	if showPrompt {
+		if !conv.Meta.IsAgent {
+			return fmt.Errorf("--prompt flag only works for agent conversations")
+		}
+		return showAgentPrompt(conv, path)
+	}
+	if showResult {
+		if !conv.Meta.IsAgent {
+			return fmt.Errorf("--result flag only works for agent conversations")
+		}
+		return showAgentResult(conv)
+	}
+	if showSummary {
+		return showSummaries(conv)
+	}
+	return nil
+}
+
+// buildPaginationOpts creates pagination options from flags.
+func buildPaginationOpts() (display.PaginationOptions, error) {
+	var opts display.PaginationOptions
+
+	if showAfterIndex > 0 || showLimit > 0 {
+		opts.AfterIndex = showAfterIndex
+		opts.Limit = showLimit
+	} else if showFitTokens > 0 {
+		opts.FitTokens = showFitTokens
+	} else if showFirst > 0 || showLast > 0 {
+		opts.First = showFirst
+		opts.Last = showLast
+	} else if showRange != "" {
+		start, end, err := parseRange(showRange)
+		if err != nil {
+			return opts, err
+		}
+		opts.RangeStart = start
+		opts.RangeEnd = end
+	}
+	return opts, nil
+}
+
+// countAgentsIfMain returns agent count for main conversations, 0 for agents.
+func countAgentsIfMain(conv *history.Conversation, path string) int {
+	if conv.Meta.IsAgent {
+		return 0
+	}
+	projectDir := filepath.Dir(path)
+	scanner := history.NewScanner(history.ScannerOptions{ProjectsDir: cfg.ProjectsDir})
+	return scanner.CountAgents(projectDir, conv.Meta.SessionID)
 }
 
 // showAgentPrompt displays the prompt that was used to spawn an agent.

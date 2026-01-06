@@ -189,81 +189,83 @@ func (d *ConversationDisplay) renderJSON(conv *history.Conversation) error {
 // Only counts user/assistant/system entries as "messages".
 // Returns (filtered messages, hasGap bool).
 func (d *ConversationDisplay) filterMessages(entries []*jsonl.RawEntry) ([]*jsonl.RawEntry, bool) {
-	// First, extract only message entries (with optional role filter)
-	var messages []*jsonl.RawEntry
-	for _, entry := range entries {
-		if entry.Type.IsMessage() {
-			// Apply role filter if specified
-			if d.opts.RoleFilter != "" && string(entry.Type) != d.opts.RoleFilter {
-				continue
-			}
-			messages = append(messages, entry)
-		}
-	}
+	messages := d.extractMessages(entries)
 
 	if !d.opts.Pagination.IsSet() {
-		return messages, false // no gap indicator needed
+		return messages, false
 	}
 
-	totalMessages := len(messages)
-
-	// Handle cursor pagination (--after-index, --limit)
-	if d.opts.Pagination.AfterIndex > 0 || d.opts.Pagination.Limit > 0 {
+	p := d.opts.Pagination
+	if p.AfterIndex > 0 || p.Limit > 0 {
 		return d.applyCursorPagination(messages)
 	}
-
-	// Handle --fit-tokens
-	if d.opts.Pagination.FitTokens > 0 {
-		return d.fitToTokenBudget(messages, d.opts.Pagination.FitTokens)
+	if p.FitTokens > 0 {
+		return d.fitToTokenBudget(messages, p.FitTokens)
 	}
-
-	// Handle --range X-Y
-	if d.opts.Pagination.RangeStart > 0 {
-		start := d.opts.Pagination.RangeStart - 1 // Convert to 0-based
-		end := d.opts.Pagination.RangeEnd
-
-		if start >= totalMessages {
-			return nil, false
-		}
-		if end > totalMessages {
-			end = totalMessages
-		}
-
-		return messages[start:end], false
+	if p.RangeStart > 0 {
+		return d.applyRangePagination(messages)
 	}
+	return d.applyFirstLastPagination(messages)
+}
 
-	// Handle --first and/or --last
+// extractMessages filters entries to only include messages with optional role filter.
+func (d *ConversationDisplay) extractMessages(entries []*jsonl.RawEntry) []*jsonl.RawEntry {
+	var messages []*jsonl.RawEntry
+	for _, entry := range entries {
+		if !entry.Type.IsMessage() {
+			continue
+		}
+		if d.opts.RoleFilter != "" && string(entry.Type) != d.opts.RoleFilter {
+			continue
+		}
+		messages = append(messages, entry)
+	}
+	return messages
+}
+
+// applyRangePagination applies --range X-Y pagination.
+func (d *ConversationDisplay) applyRangePagination(messages []*jsonl.RawEntry) ([]*jsonl.RawEntry, bool) {
+	total := len(messages)
+	start := d.opts.Pagination.RangeStart - 1 // Convert to 0-based
+	end := d.opts.Pagination.RangeEnd
+
+	if start >= total {
+		return nil, false
+	}
+	if end > total {
+		end = total
+	}
+	return messages[start:end], false
+}
+
+// applyFirstLastPagination applies --first and/or --last pagination.
+func (d *ConversationDisplay) applyFirstLastPagination(messages []*jsonl.RawEntry) ([]*jsonl.RawEntry, bool) {
+	total := len(messages)
 	first := d.opts.Pagination.First
 	last := d.opts.Pagination.Last
 
-	// Only --first specified
 	if first > 0 && last == 0 {
-		if first >= totalMessages {
+		if first >= total {
 			return messages, false
 		}
 		return messages[:first], false
 	}
 
-	// Only --last specified
 	if last > 0 && first == 0 {
-		if last >= totalMessages {
+		if last >= total {
 			return messages, false
 		}
-		return messages[totalMessages-last:], false
+		return messages[total-last:], false
 	}
 
-	// Both --first and --last specified
 	if first > 0 && last > 0 {
-		if first+last >= totalMessages {
-			// No gap needed, show all
+		if first+last >= total {
 			return messages, false
 		}
-
-		// Return first N + last M (gap will be rendered between)
 		result := make([]*jsonl.RawEntry, 0, first+last)
 		result = append(result, messages[:first]...)
-		result = append(result, messages[totalMessages-last:]...)
-		return result, true // has gap
+		result = append(result, messages[total-last:]...)
+		return result, true
 	}
 
 	return messages, false
@@ -371,72 +373,85 @@ func (d *ConversationDisplay) renderFitTokensInfo(shown, total, budget int) {
 }
 
 func (d *ConversationDisplay) renderFormatted(conv *history.Conversation) error {
-	// Header
 	d.renderHeader(conv)
 
-	// Apply pagination filtering
 	messages, hasGap := d.filterMessages(conv.Entries)
+	indexMap, totalMessages := d.buildIndexMap(conv.Entries)
 
-	// Build index map for all messages to get correct indices
-	// Note: index is based on original position in conversation (before role filter)
+	d.renderMessagesWithGap(messages, indexMap, totalMessages, hasGap)
+	d.renderPaginationStatus(len(messages), totalMessages)
+	d.renderFooter(conv)
+
+	return nil
+}
+
+// buildIndexMap creates a map of entry pointers to their 1-based message indices.
+func (d *ConversationDisplay) buildIndexMap(entries []*jsonl.RawEntry) (map[*jsonl.RawEntry]int, int) {
 	indexMap := make(map[*jsonl.RawEntry]int)
 	totalMessages := 0
-	for _, e := range conv.Entries {
+	for _, e := range entries {
 		if e.Type.IsMessage() {
 			totalMessages++
 			indexMap[e] = totalMessages
 		}
 	}
+	return indexMap, totalMessages
+}
 
-	// Render messages with gap if needed
+// renderMessagesWithGap renders messages, handling gaps appropriately.
+func (d *ConversationDisplay) renderMessagesWithGap(messages []*jsonl.RawEntry, indexMap map[*jsonl.RawEntry]int, totalMessages int, hasGap bool) {
 	if hasGap && d.opts.Pagination.First > 0 && d.opts.Pagination.Last > 0 {
-		// First/last combined mode with gap
-		firstCount := d.opts.Pagination.First
-		lastCount := d.opts.Pagination.Last
-
-		// Render first N messages
-		for i := 0; i < firstCount && i < len(messages); i++ {
-			d.renderEntry(messages[i], indexMap[messages[i]])
-		}
-
-		// Render gap indicator
-		d.renderGapIndicator(totalMessages, firstCount, lastCount)
-
-		// Render last M messages
-		for i := firstCount; i < len(messages); i++ {
-			d.renderEntry(messages[i], indexMap[messages[i]])
-		}
+		d.renderFirstLastWithGap(messages, indexMap, totalMessages)
 	} else if hasGap {
-		// Other pagination modes with gap (cursor, fit-tokens) - show simple gap at start
-		omitted := totalMessages - len(messages)
-		fmt.Fprintln(d.opts.Writer)
-		fmt.Fprintf(d.opts.Writer, "%s\n", Dim(fmt.Sprintf("    ... %d earlier messages omitted ...", omitted)))
-		fmt.Fprintln(d.opts.Writer)
-
-		// Render all messages
-		for _, entry := range messages {
-			d.renderEntry(entry, indexMap[entry])
-		}
+		d.renderWithSimpleGap(messages, indexMap, totalMessages)
 	} else {
-		// No gap, render all filtered messages
-		for _, entry := range messages {
-			d.renderEntry(entry, indexMap[entry])
-		}
+		d.renderAllMessages(messages, indexMap)
+	}
+}
+
+// renderFirstLastWithGap renders first N and last M messages with a gap indicator.
+func (d *ConversationDisplay) renderFirstLastWithGap(messages []*jsonl.RawEntry, indexMap map[*jsonl.RawEntry]int, totalMessages int) {
+	firstCount := d.opts.Pagination.First
+	lastCount := d.opts.Pagination.Last
+
+	for i := 0; i < firstCount && i < len(messages); i++ {
+		d.renderEntry(messages[i], indexMap[messages[i]])
 	}
 
-	// Show appropriate pagination info
-	if d.opts.Pagination.AfterIndex > 0 || d.opts.Pagination.Limit > 0 {
-		d.renderCursorInfo(len(messages), totalMessages, d.opts.Pagination.AfterIndex)
-	} else if d.opts.Pagination.FitTokens > 0 {
-		d.renderFitTokensInfo(len(messages), totalMessages, d.opts.Pagination.FitTokens)
-	} else if d.opts.Pagination.IsSet() {
-		d.renderPaginationInfo(len(messages), totalMessages)
+	d.renderGapIndicator(totalMessages, firstCount, lastCount)
+
+	for i := firstCount; i < len(messages); i++ {
+		d.renderEntry(messages[i], indexMap[messages[i]])
 	}
+}
 
-	// Footer with navigation hints
-	d.renderFooter(conv)
+// renderWithSimpleGap renders messages with a simple gap indicator at start.
+func (d *ConversationDisplay) renderWithSimpleGap(messages []*jsonl.RawEntry, indexMap map[*jsonl.RawEntry]int, totalMessages int) {
+	omitted := totalMessages - len(messages)
+	fmt.Fprintln(d.opts.Writer)
+	fmt.Fprintf(d.opts.Writer, "%s\n", Dim(fmt.Sprintf("    ... %d earlier messages omitted ...", omitted)))
+	fmt.Fprintln(d.opts.Writer)
 
-	return nil
+	d.renderAllMessages(messages, indexMap)
+}
+
+// renderAllMessages renders all messages without gaps.
+func (d *ConversationDisplay) renderAllMessages(messages []*jsonl.RawEntry, indexMap map[*jsonl.RawEntry]int) {
+	for _, entry := range messages {
+		d.renderEntry(entry, indexMap[entry])
+	}
+}
+
+// renderPaginationStatus shows appropriate pagination info.
+func (d *ConversationDisplay) renderPaginationStatus(shown, total int) {
+	p := d.opts.Pagination
+	if p.AfterIndex > 0 || p.Limit > 0 {
+		d.renderCursorInfo(shown, total, p.AfterIndex)
+	} else if p.FitTokens > 0 {
+		d.renderFitTokensInfo(shown, total, p.FitTokens)
+	} else if p.IsSet() {
+		d.renderPaginationInfo(shown, total)
+	}
 }
 
 func (d *ConversationDisplay) renderFooter(conv *history.Conversation) {
@@ -492,41 +507,45 @@ func (d *ConversationDisplay) renderEntry(entry *jsonl.RawEntry, index int) {
 		return
 	}
 
-	// Check if there's any visible content
-	hasContent := false
-	for _, block := range msg.Content {
-		switch block.Type {
-		case jsonl.BlockTypeText:
-			if block.Text != "" {
-				hasContent = true
-			}
-		case jsonl.BlockTypeThinking:
-			if d.opts.ShowThinking && block.Thinking != "" {
-				hasContent = true
-			}
-		case jsonl.BlockTypeToolUse, jsonl.BlockTypeToolResult:
-			if d.opts.ShowTools {
-				hasContent = true
-			}
-		}
-		if hasContent {
-			break
-		}
-	}
-
-	// Skip entries with no visible content
-	if !hasContent {
+	if !d.hasVisibleContent(msg) {
 		return
 	}
 
 	fmt.Fprintln(d.opts.Writer)
+	d.renderRoleHeader(entry, index)
 
-	// Message index prefix (if enabled)
+	for _, block := range msg.Content {
+		d.renderBlock(&block)
+	}
+}
+
+// hasVisibleContent checks if a message has any content that will be displayed.
+func (d *ConversationDisplay) hasVisibleContent(msg *jsonl.Message) bool {
+	for _, block := range msg.Content {
+		switch block.Type {
+		case jsonl.BlockTypeText:
+			if block.Text != "" {
+				return true
+			}
+		case jsonl.BlockTypeThinking:
+			if d.opts.ShowThinking && block.Thinking != "" {
+				return true
+			}
+		case jsonl.BlockTypeToolUse, jsonl.BlockTypeToolResult:
+			if d.opts.ShowTools {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// renderRoleHeader renders the role prefix and timestamp for an entry.
+func (d *ConversationDisplay) renderRoleHeader(entry *jsonl.RawEntry, index int) {
 	if d.opts.ShowNumbering && index > 0 {
 		fmt.Fprintf(d.opts.Writer, "%s ", Number(fmt.Sprintf("[%d]", index)))
 	}
 
-	// Role header
 	switch entry.Type {
 	case jsonl.EntryTypeUser:
 		fmt.Fprintf(d.opts.Writer, "%s", UserRole("User"))
@@ -537,72 +556,84 @@ func (d *ConversationDisplay) renderEntry(entry *jsonl.RawEntry, index int) {
 	}
 
 	if entry.Timestamp != "" {
-		t, _ := time.Parse(time.RFC3339, entry.Timestamp)
-		if !t.IsZero() {
+		if t, err := time.Parse(time.RFC3339, entry.Timestamp); err == nil && !t.IsZero() {
 			fmt.Fprintf(d.opts.Writer, "  %s", Timestamp(t.Format("15:04:05")))
 		}
 	}
 	fmt.Fprintln(d.opts.Writer)
-
-	// Content blocks
-	for _, block := range msg.Content {
-		d.renderBlock(&block)
-	}
 }
 
 func (d *ConversationDisplay) renderBlock(block *jsonl.ContentBlock) {
 	switch block.Type {
 	case jsonl.BlockTypeText:
-		if block.Text != "" {
-			fmt.Fprintln(d.opts.Writer, block.Text)
-		}
-
+		d.renderTextBlock(block)
 	case jsonl.BlockTypeThinking:
-		if d.opts.ShowThinking && block.Thinking != "" {
-			fmt.Fprintf(d.opts.Writer, "\n%s\n", Section("Thinking:"))
-			// Indent thinking content
-			lines := strings.Split(block.Thinking, "\n")
-			for _, line := range lines {
-				fmt.Fprintln(d.opts.Writer, Thinking("  "+line))
-			}
-		}
-
+		d.renderThinkingBlock(block)
 	case jsonl.BlockTypeToolUse:
-		if d.opts.ShowTools {
-			fmt.Fprintf(d.opts.Writer, "\n%s %s\n", ToolCall("Tool:"), ToolName(block.Name))
-			if block.Input != nil {
-				var input map[string]interface{}
-				if json.Unmarshal(block.Input, &input) == nil {
-					// Show abbreviated input
-					for k, v := range input {
-						val := fmt.Sprintf("%v", v)
-						if len(val) > 100 {
-							val = val[:100] + "..."
-						}
-						fmt.Fprintf(d.opts.Writer, "  %s: %s\n", Dim(k), val)
-					}
-				}
-			}
-		}
-
+		d.renderToolUseBlock(block)
 	case jsonl.BlockTypeToolResult:
-		if d.opts.ShowTools {
-			status := Success("OK")
-			if block.IsError {
-				status = Error("ERROR")
-			}
-			fmt.Fprintf(d.opts.Writer, "%s %s\n", ToolCall("Result:"), status)
-			if block.Content != nil {
-				var content string
-				if json.Unmarshal(block.Content, &content) == nil {
-					if len(content) > 500 {
-						content = content[:500] + "..."
-					}
-					fmt.Fprintln(d.opts.Writer, Dim(content))
-				}
-			}
-		}
+		d.renderToolResultBlock(block)
 	}
+}
+
+func (d *ConversationDisplay) renderTextBlock(block *jsonl.ContentBlock) {
+	if block.Text != "" {
+		fmt.Fprintln(d.opts.Writer, block.Text)
+	}
+}
+
+func (d *ConversationDisplay) renderThinkingBlock(block *jsonl.ContentBlock) {
+	if !d.opts.ShowThinking || block.Thinking == "" {
+		return
+	}
+	fmt.Fprintf(d.opts.Writer, "\n%s\n", Section("Thinking:"))
+	lines := strings.Split(block.Thinking, "\n")
+	for _, line := range lines {
+		fmt.Fprintln(d.opts.Writer, Thinking("  "+line))
+	}
+}
+
+func (d *ConversationDisplay) renderToolUseBlock(block *jsonl.ContentBlock) {
+	if !d.opts.ShowTools {
+		return
+	}
+	fmt.Fprintf(d.opts.Writer, "\n%s %s\n", ToolCall("Tool:"), ToolName(block.Name))
+	if block.Input == nil {
+		return
+	}
+	var input map[string]interface{}
+	if json.Unmarshal(block.Input, &input) != nil {
+		return
+	}
+	for k, v := range input {
+		val := fmt.Sprintf("%v", v)
+		if len(val) > 100 {
+			val = val[:100] + "..."
+		}
+		fmt.Fprintf(d.opts.Writer, "  %s: %s\n", Dim(k), val)
+	}
+}
+
+func (d *ConversationDisplay) renderToolResultBlock(block *jsonl.ContentBlock) {
+	if !d.opts.ShowTools {
+		return
+	}
+	status := Success("OK")
+	if block.IsError {
+		status = Error("ERROR")
+	}
+	fmt.Fprintf(d.opts.Writer, "%s %s\n", ToolCall("Result:"), status)
+	if block.Content == nil {
+		return
+	}
+	var content string
+	if json.Unmarshal(block.Content, &content) != nil {
+		return
+	}
+	if len(content) > 500 {
+		content = content[:500] + "..."
+	}
+	fmt.Fprintln(d.opts.Writer, Dim(content))
 }
 
 // RenderAgentList renders a list of agents for a conversation.
